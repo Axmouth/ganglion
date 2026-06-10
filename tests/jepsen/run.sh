@@ -77,6 +77,8 @@ run_scenario() {
 run_all() {
   local scenario_files=("$SCENARIO_DIR"/*.sh)
   local scenarios_jsons=()
+  local failed_count=0
+  local scenario_count=0
 
   for file in "${scenario_files[@]}"; do
     if [[ ! -x "$file" ]]; then
@@ -85,7 +87,16 @@ run_all() {
 
     name="$(basename "${file%.sh}")"
     scenarios_jsons+=("$ARTIFACT_DIR/${name}.json")
+    scenario_count=$((scenario_count + 1))
+
+    set +e
     run_scenario "$file" "$name"
+    local status=$?
+    set -e
+
+    if [[ "$status" -ne 0 ]]; then
+      failed_count=$((failed_count + 1))
+    fi
   done
 
   if [[ ${#scenarios_jsons[@]} -eq 0 ]]; then
@@ -106,13 +117,19 @@ run_all() {
     --arg runner "tests/jepsen/run.sh" \
     --arg mode "all" \
     --arg artifact_dir "$ARTIFACT_DIR" \
+    --argjson failed_count "$failed_count" \
+    --argjson scenario_count "$scenario_count" \
     '{
       "runner": $runner,
       "mode": $mode,
       "artifact_dir": $artifact_dir,
+      "scenario_count": $scenario_count,
+      "failed_scenarios": $failed_count,
       "scenarios": .
     }' \
     "${scenarios_jsons[@]}" > "$ARTIFACT_DIR/run-summary.json"
+
+  return "$failed_count"
 }
 
 run_scenario_command() {
@@ -143,6 +160,8 @@ run_scenario_command() {
       "runner": $runner,
       "mode": $mode,
       "artifact_dir": $artifact_dir,
+      "scenario_count": 1,
+      "failed_scenarios": 0,
       "scenarios": .
     }' \
     "$ARTIFACT_DIR/${scenario}.json" > "$ARTIFACT_DIR/run-summary.json"

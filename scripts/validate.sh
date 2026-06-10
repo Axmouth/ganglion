@@ -123,8 +123,73 @@ run_proptest() {
 run_jepsen() {
   mkdir -p "$JEPSEN_ARTIFACT_DIR"
   echo "validate: tests/jepsen/run.sh all --artifact-dir $JEPSEN_ARTIFACT_DIR"
+  local jepsen_rc=0
+
+  set +e
   bash "$ROOT_DIR/tests/jepsen/run.sh" all --artifact-dir "$JEPSEN_ARTIFACT_DIR"
-  SUMMARY_JEPSEN="pass"
+  jepsen_rc=$?
+  set -e
+
+  if [[ "$jepsen_rc" -eq 0 ]]; then
+    SUMMARY_JEPSEN="pass"
+  else
+    SUMMARY_JEPSEN="fail"
+  fi
+}
+
+verify_jepsen_artifacts() {
+  local summary_file="$JEPSEN_ARTIFACT_DIR/run-summary.json"
+  if [[ ! -f "$summary_file" ]]; then
+    echo "validate: missing jepsen summary artifact: $summary_file"
+    return 1
+  fi
+
+  local scenario_count
+  local expected_count
+  local entry_count
+  scenario_count="$(jq -r '.scenario_count // (.scenarios | length)' "$summary_file")"
+  entry_count="$(jq -r '.scenarios | length' "$summary_file")"
+  expected_count="$(jq -r '.scenarios | length' "$summary_file")"
+
+  if [[ "$scenario_count" != "$expected_count" || "$entry_count" != "$expected_count" ]]; then
+    echo "validate: inconsistent scenario-count metadata in $summary_file"
+    return 1
+  fi
+
+  if [[ "$entry_count" -eq 0 ]]; then
+    echo "validate: jepsen summary has no scenario entries: $summary_file"
+    return 1
+  fi
+
+  local missing=0
+  while IFS= read -r scenario_name; do
+    if [[ -z "$scenario_name" ]]; then
+      continue
+    fi
+
+    local scenario_file="$JEPSEN_ARTIFACT_DIR/${scenario_name}.json"
+    if [[ ! -f "$scenario_file" ]]; then
+      echo "validate: missing scenario summary file: $scenario_file"
+      missing=1
+    fi
+  done < <(jq -r '.scenarios[].scenario // empty' "$summary_file")
+
+  while IFS= read -r log_path; do
+    if [[ -z "$log_path" ]]; then
+      continue
+    fi
+
+    if [[ ! -f "$log_path" ]]; then
+      echo "validate: missing scenario log file: $log_path"
+      missing=1
+    fi
+  done < <(jq -r '.scenarios[].log // empty' "$summary_file")
+
+  if [[ "$missing" -eq 1 ]]; then
+    return 1
+  fi
+
+  return 0
 }
 
 write_summary() {
@@ -246,6 +311,9 @@ fi
 
 if [[ "$RUN_JEPSEN" == true ]]; then
   run_jepsen
+  if ! verify_jepsen_artifacts; then
+    SUMMARY_JEPSEN="fail"
+  fi
 fi
 
 mkdir -p "$JEPSEN_ARTIFACT_DIR"

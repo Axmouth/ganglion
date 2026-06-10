@@ -79,6 +79,12 @@ It is a roadmap artifact, not a time-based log.
 - This keeps invariant coverage active in non-Clojure environments while keeping the future Jepsen hook in place.
 - The fallback set now includes `06-persistence-backend-parity.sh` to validate storage parity and startup tails in one persistence scenario.
 
+### Scenario artifact hardening (current)
+
+- `tests/jepsen/run.sh all` now records `scenario_count` and `failed_scenarios` in `run-summary.json`.
+- `run_scenario` summaries are always written individually and consumed by `validate-summary.json`.
+- Aggregate rerun confidence now requires the scenario summary artifacts to be present before validation is marked successful.
+
 ## Exit checks
 
 - No test should treat “new follower start” as a no-op publish path.

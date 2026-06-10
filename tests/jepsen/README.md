@@ -52,6 +52,17 @@ If a broad `scripts/validate.sh` or `tests/jepsen/run.sh all` invocation appears
 - Confirm artifacts are produced under the chosen artifact directory.
 - Re-run the full aggregate only after checking for orphaned background invocations from prior runs.
 
+### Scenario summary precondition
+
+- `tests/jepsen/run.sh all` always writes:
+  - `<scenario>.json` for each executable scenario
+  - `run-summary.json` with `scenario_count` and `failed_scenarios`
+- `scripts/validate.sh` now treats missing/partial Jepsen artifacts as a run failure in `validate-summary.json`.
+- Practical sequence before rerunning aggregate:
+  1. `tests/jepsen/run.sh scenario <name>` and confirm `<name>.json` and `<name>.log` appear.
+  2. `ls <artifact-dir>/run-summary.json` and confirm it includes all scenario entries.
+  3. Re-run full aggregate only once the precondition passes.
+
 ## Scenario inventory
 
 - `01-baseline-failover.sh`

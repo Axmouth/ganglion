@@ -1107,3 +1107,44 @@ Make persistence parity scenario coverage explicitly assert mixed-tail startup-r
 1. Expand `MetadataLog` adapter catalog and policy hooks.
 2. Add retention/compaction tooling for durable metadata logs.
 3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## Plan Snapshot v26
+
+### Goal
+
+Make aggregate Jepsen reruns deterministic and self-checking based on scenario artifacts.
+
+### Completed in this snapshot
+
+- `tests/jepsen/run.sh`:
+  - `run all` now tracks and reports `scenario_count` and `failed_scenarios` in `run-summary.json`.
+  - aggregate execution continues across scenario runs and returns aggregated failure count, while still writing summaries for each scenario.
+- `scripts/validate.sh`:
+  - validates Jepsen artifact completeness after running `tests/jepsen/run.sh all` before writing final validation summary.
+  - treats missing/malformed Jepsen artifacts or non-zero scenario failures as `runs.jepsen.result = fail`.
+- `tests/jepsen/README.md`:
+  - added summary precondition guidance for reruns and explicit artifact presence checks.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational reliability while extending coverage
+
+1. Keep aggregate failure counts authoritative for rerun decisions.
+2. Expand scenario fallback scripts toward explicit backend restart/failover ordering checks.
+3. Preserve artifact-count invariants before any CI gating decisions.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport/runtime readiness
+
+1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+2. Add committed-snapshot publication channels and health telemetry.
+3. Expand persistence failover/rejoin scenarios with backend sequencing.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Expand `MetadataLog` adapter catalog and policy hooks.
+2. Add retention/compaction tooling for durable metadata logs.
+3. Move strategy registries (planner and persistence profile) into reusable operator configuration.

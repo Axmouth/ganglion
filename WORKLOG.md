@@ -818,3 +818,32 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Expand `MetadataLog` adapter catalog and policy hooks.
   2. Add retention/compaction tooling for durable metadata logs.
   3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## v26 execution pass completed
+
+- `tests/jepsen/run.sh`:
+  - `run all` now records `scenario_count` and `failed_scenarios` in aggregate summary.
+  - scenario execution no longer aborts on first failing scenario; it aggregates exit status and writes per-scenario results consistently.
+- `scripts/validate.sh`:
+  - added post-run artifact verification:
+    - `run-summary.json` must exist,
+    - `scenario_count` must match entry count,
+    - each scenario summary and log file must exist.
+  - marks `runs.jepsen.result` as `fail` when aggregates report missing artifacts or failures.
+- `tests/jepsen/README.md`:
+  - added explicit scenario-summary precondition steps for aggregate reruns.
+
+## v26 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add explicit backend restart/failover ordering checks to persistence scenarios.
+  2. Keep aggregate run summaries authoritative (`scenario_count` + artifact completeness + failure totals) in CI gating.
+  3. Preserve this precondition requirement in both docs and validation gates.
+- Medium-term:
+  1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+  2. Add committed-snapshot publication channels and durability telemetry.
+  3. Expand persistence failover/rejoin scenarios with backend sequencing.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
