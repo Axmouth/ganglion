@@ -359,7 +359,24 @@ pub struct PersistedMetadataNode {
 }
 
 impl PersistedMetadataNode {
+    const DEFAULT_TAIL_REPLAY_LIMIT: usize = 1;
+
     pub fn new<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+    ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_replay_policy(
+            path,
+            node_id,
+            initial_snapshot,
+            FileMetadataReplayPolicy::TruncateTail {
+                max_tail_lines: Self::DEFAULT_TAIL_REPLAY_LIMIT,
+            },
+        )
+    }
+
+    pub fn new_strict<P: Into<std::path::PathBuf>>(
         path: P,
         node_id: impl Into<String>,
         initial_snapshot: CoordinationSnapshot,
@@ -877,13 +894,61 @@ mod tests {
         let path = unique_temp_path("corrupt-log");
         fs::write(&path, b"{not-json}\n").expect("write invalid log payload");
 
-        let err = PersistedMetadataNode::new(path, "node-a", CoordinationSnapshot::default())
-            .expect_err("invalid log must be rejected");
+        let err =
+            PersistedMetadataNode::new_strict(path, "node-a", CoordinationSnapshot::default())
+                .expect_err("invalid log must be rejected");
         assert!(matches!(err, OpenraftAdapterError::Storage(_)));
     }
 
     #[test]
-    fn persisted_node_tolerates_truncated_tail_corruption_when_enabled() {
+    fn persisted_node_tolerates_truncated_tail_corruption_when_enabled_by_default() {
+        let path = unique_temp_path("tolerate-tail-default");
+        let writer =
+            PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                .expect("writer should initialize");
+        writer.set_leader("node-a");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                },
+                Some(1),
+            )
+            .expect("first write");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                },
+                None,
+            )
+            .expect("second write");
+
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write as _;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("append corrupted line");
+            file.write_all(b"{not-json}\n")
+                .expect("append malformed tail");
+        }
+
+        let recovered = PersistedMetadataNode::new(path, "node-a", CoordinationSnapshot::default())
+            .expect("node should recover from bounded tail corruption by default");
+
+        assert_eq!(recovered.snapshot().generation, 2);
+        assert_eq!(recovered.current_term(), 1);
+        assert_eq!(recovered.log_len(), 2);
+    }
+
+    #[test]
+    fn persisted_node_tolerates_truncated_tail_corruption_when_explicit() {
         let path = unique_temp_path("tolerate-tail");
         let writer =
             PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
@@ -942,8 +1007,9 @@ mod tests {
 "#;
         fs::write(&path, payload.as_bytes()).expect("write test payload");
 
-        let err = PersistedMetadataNode::new(path, "node-a", CoordinationSnapshot::default())
-            .expect_err("out-of-order log must be rejected");
+        let err =
+            PersistedMetadataNode::new_strict(path, "node-a", CoordinationSnapshot::default())
+                .expect_err("out-of-order log must be rejected");
         assert!(matches!(err, OpenraftAdapterError::Storage(_)));
     }
 

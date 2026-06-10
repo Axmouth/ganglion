@@ -321,3 +321,29 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add planner strategy registry with parameterized policies.
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v11 execution pass completed
+
+- `PersistedMetadataNode` startup policy:
+  - Default `new()` now uses bounded-tail replay (`TruncateTail`) with a single-line recovery limit.
+  - Added explicit `new_strict()` for old fail-fast startup semantics.
+  - Kept `new_with_replay_policy(...)` as direct policy constructor.
+- `PersistedMetadataNode` test coverage:
+  - Added `persisted_node_tolerates_truncated_tail_corruption_when_enabled_by_default` to verify default path.
+  - Added `persisted_node_tolerates_truncated_tail_corruption_when_explicit` to verify explicit tail policy.
+  - Switched malformed/non-sequential startup rejection tests to `new_strict()` to preserve strict behavior guarantees.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Make bounded-tail defaults configurable by deployment profile and threshold.
+  2. Emit startup policy selection in validation artifacts for recovery diagnostics.
+  3. Keep strict and resilient constructors separate and explicit in all adapter-facing docs.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+  2. Introduce committed-snapshot publication plumbing for external controllers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Expand backend adapters and migration plans beyond basic file logs.

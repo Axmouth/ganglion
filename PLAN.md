@@ -439,3 +439,46 @@ Expose configurable startup recovery behavior and reduce validation friction by 
 1. Add planner strategy registry and parameterized strategy options.
 2. Add snapshot compaction/migration and history retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## Plan Snapshot v11
+
+### Goal
+
+Route persisted startup semantics to resilience-first defaults while keeping strict-mode for strict environments.
+
+### Completed in this snapshot
+
+- `PersistedMetadataNode` startup behavior:
+  - `new()` now defaults to `FileMetadataReplayPolicy::TruncateTail` with a bounded tail limit.
+  - Added `new_strict()` as an explicit strict-startup constructor.
+  - Preserved `new_with_replay_policy(...)` for direct policy selection.
+- Recovery test coverage:
+  - Added default-startup test that verifies malformed single-line tails are tolerated and state is recovered.
+  - Added strict-mode coverage for malformed and non-sequential startup payloads.
+  - Kept explicit policy override coverage for bounded-tail behavior.
+- Documentation:
+  - Updated API docs for default-vs-strict persisted constructors.
+
+### Short-Term Roadmap
+
+#### Resolution target: resilience and operator control
+
+1. Add configurable recovery policy selection by deployment profile.
+2. Record recovery-policy choices in validation/diagnostic outputs.
+3. Keep strict-mode explicit in test scaffolding and adapter factories where needed.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Expose committed-snapshot events with optional watchers or event sinks.
+3. Expand Jepsen fallback sequence coverage for restart/recovery and leader contention.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
