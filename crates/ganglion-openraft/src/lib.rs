@@ -389,6 +389,20 @@ impl PersistedMetadataNode {
         )
     }
 
+    pub fn new_with_tail_replay_limit<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        max_tail_lines: usize,
+    ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_replay_policy(
+            path,
+            node_id,
+            initial_snapshot,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines },
+        )
+    }
+
     pub fn new_with_replay_policy<P: Into<std::path::PathBuf>>(
         path: P,
         node_id: impl Into<String>,
@@ -993,6 +1007,58 @@ mod tests {
             FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
         )
         .expect("node should recover from bounded tail corruption");
+
+        assert_eq!(recovered.snapshot().generation, 2);
+        assert_eq!(recovered.current_term(), 1);
+        assert_eq!(recovered.log_len(), 2);
+    }
+
+    #[test]
+    fn persisted_node_tolerates_truncated_tail_corruption_with_custom_limit() {
+        let path = unique_temp_path("tolerate-tail-custom");
+        let writer =
+            PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                .expect("writer should initialize");
+        writer.set_leader("node-a");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                },
+                Some(1),
+            )
+            .expect("first write");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                },
+                None,
+            )
+            .expect("second write");
+
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write as _;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("append corrupted lines");
+            file.write_all(b"{bad}\n{bad}\n")
+                .expect("append malformed tail");
+        }
+
+        let recovered = PersistedMetadataNode::new_with_tail_replay_limit(
+            path,
+            "node-a",
+            CoordinationSnapshot::default(),
+            2,
+        )
+        .expect("node should recover when custom limit permits tail");
 
         assert_eq!(recovered.snapshot().generation, 2);
         assert_eq!(recovered.current_term(), 1);

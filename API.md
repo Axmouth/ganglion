@@ -77,8 +77,9 @@ This file tracks what each part of the current scaffolding is meant to do.
   - File-backed consensus adapter using durable logs from `ganglion-storage`.
   - Restores current term and latest committed snapshot from disk during construction.
   - Supports replayable term/retry behavior for restart flows.
-  - `PersistedMetadataNode::new` now uses bounded-tail replay by default.
-  - `PersistedMetadataNode::new_strict` preserves strict validation on startup.
+- `PersistedMetadataNode::new` now uses bounded-tail replay by default.
+- `PersistedMetadataNode::new_strict` preserves strict validation on startup.
+- `PersistedMetadataNode::new_with_tail_replay_limit` sets explicit tolerated tail limit for startup.
 
 - `OpenraftAdapterError::Storage`
   - New variant for storage failures from durability backends.

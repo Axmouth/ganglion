@@ -347,3 +347,28 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add planner strategy registry with parameterized policies.
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v12 execution pass completed
+
+- `PersistedMetadataNode` configuration:
+  - Added `new_with_tail_replay_limit(...)` to control bounded-tail replay allowance at startup.
+  - Kept `new()` defaulting to bounded-tail recovery.
+  - Kept explicit `new_strict()` and `new_with_replay_policy(...)` for strict/custom policy selection.
+- Test coverage:
+  - Added persisted restart test for custom tail budget via `new_with_tail_replay_limit`.
+  - Preserved default and explicit constructor coverage for bounded-tail and strict paths.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add profile-driven policy defaults to adapter construction.
+  2. Emit startup policy choice in validation and startup diagnostics.
+  3. Keep strict-mode APIs explicit in adapter factories.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+  2. Introduce committed-snapshot publication plumbing for external controllers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Expand backend adapters and migration plans beyond basic file logs.

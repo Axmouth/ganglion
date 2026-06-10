@@ -482,3 +482,42 @@ Route persisted startup semantics to resilience-first defaults while keeping str
 1. Add planner strategy registry and parameterized strategy options.
 2. Add snapshot compaction/migration and durable retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## Plan Snapshot v12
+
+### Goal
+
+Make persisted startup recovery policy configuration explicit without removing bounded-tail defaults.
+
+### Completed in this snapshot
+
+- `PersistedMetadataNode`:
+  - Added `new_with_tail_replay_limit(...)` for deployment-specific tolerance tuning.
+  - Kept default bounded-tail startup and strict constructor behavior unchanged.
+  - Reused existing policy override path for arbitrary replay strategies.
+- Test coverage:
+  - Added default + explicit + custom-limit restart recovery assertions in openraft persisted node tests.
+
+### Short-Term Roadmap
+
+#### Resolution target: resilience and operator control
+
+1. Make profile-driven policy defaults available at adapter construction sites (for example, env/config file).
+2. Capture chosen startup policy in validation artifacts and local startup diagnostics.
+3. Keep strict-mode APIs explicit in all persisted adapter call paths.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Expose committed-snapshot events with optional watchers or event sinks.
+3. Expand Jepsen fallback sequence coverage for restart/recovery and leader contention.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
