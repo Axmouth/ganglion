@@ -1975,6 +1975,65 @@ mod tests {
     }
 
     #[test]
+    fn persisted_node_failover_ordering_after_restart() {
+        let path = unique_temp_path("failover-ordering");
+        let bootstrap =
+            PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                .expect("bootstrap node should initialize");
+        bootstrap.set_leader("node-a");
+        bootstrap
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                },
+                Some(1),
+            )
+            .expect("initial proposal should apply");
+        assert_eq!(bootstrap.current_term(), 1);
+        assert_eq!(bootstrap.log_len(), 1);
+
+        // Failover to a new node id with higher term and verify log replay ordering.
+        let new_leader =
+            PersistedMetadataNode::new(path.clone(), "node-b", CoordinationSnapshot::default())
+                .expect("new leader candidate should recover");
+        new_leader.set_leader("node-b");
+        new_leader
+            .apply_snapshot(
+                "node-b",
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..Default::default()
+                },
+                Some(2),
+            )
+            .expect("higher-term failover write should apply");
+
+        assert_eq!(new_leader.current_term(), 2);
+        assert_eq!(new_leader.log_len(), 1);
+        assert_eq!(new_leader.snapshot().generation, 2);
+
+        // Recovered node in same cluster now observes failover and can only continue at term >=2.
+        let recovered_follower =
+            PersistedMetadataNode::new(path, "node-a", CoordinationSnapshot::default())
+                .expect("node should recover updated cluster state");
+        recovered_follower.set_leader("node-a");
+        let stale_after_failover = recovered_follower.apply_snapshot(
+            "node-a",
+            CoordinationSnapshot {
+                generation: 3,
+                ..Default::default()
+            },
+            Some(1),
+        );
+        assert!(matches!(
+            stale_after_failover,
+            Err(OpenraftAdapterError::StaleTerm)
+        ));
+    }
+
+    #[test]
     fn persisted_node_resets_log_on_term_bump() {
         let node = PersistedMetadataNode::new(
             unique_temp_path("term-bump"),

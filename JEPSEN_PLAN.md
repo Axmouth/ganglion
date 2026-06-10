@@ -78,6 +78,7 @@ It is a roadmap artifact, not a time-based log.
 - Scenario scripts in `tests/jepsen/scenarios/` now run focused `ganglion-openraft` Rust checks when Jepsen/Clojure is unavailable.
 - This keeps invariant coverage active in non-Clojure environments while keeping the future Jepsen hook in place.
 - The fallback set now includes `06-persistence-backend-parity.sh` to validate storage parity and startup tails in one persistence scenario.
+- That scenario now also exercises explicit restart/failover ordering, including stale-term rejection after a higher-term failover write.
 
 ### Scenario artifact hardening (current)
 

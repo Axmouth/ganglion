@@ -7,6 +7,7 @@ echo " - file and Keratin persistence backends match bounded-tail behavior"
 echo " - malformed tails recover only when replay budget allows"
 echo " - persisted startup constructors remain deterministic under mixed-tail startup logs"
 echo " - stale term proposals remain rejected after restart"
+echo " - restart failover ordering enforces higher-term leadership sequencing"
 echo " - log reset behavior is correct on term bump"
 
 if command -v clojure >/dev/null 2>&1; then
@@ -25,6 +26,7 @@ cargo test -p ganglion-storage --features keratin -- --test-threads=1 keratin_me
 cargo test -p ganglion-openraft persisted_node_startup_profile_selection_with_mixed_tail_and_explicit_override --quiet
 cargo test -p ganglion-openraft persisted_node_recovered_startup_replays_control_loop_on_next_apply --quiet
 cargo test -p ganglion-openraft persisted_node_rejects_stale_term_after_restart --quiet
+cargo test -p ganglion-openraft persisted_node_failover_ordering_after_restart --quiet
 cargo test -p ganglion-openraft persisted_node_resets_log_on_term_bump --quiet
 cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet
 echo "INFO: persistence-backend-parity completed"

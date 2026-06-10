@@ -910,3 +910,31 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Expand `MetadataLog` adapter catalog and policy hooks.
   2. Add retention/compaction tooling for durable metadata logs.
   3. Move planner and persistence-profile selection into operator-facing registry surfaces.
+
+## v29 execution pass completed
+
+- `crates/ganglion-openraft/src/lib.rs`:
+  - added `persisted_node_failover_ordering_after_restart`:
+    - validates failover term ordering across a restarted persisted path (`node-a` -> `node-b`),
+    - asserts higher-term takeover write is accepted and log length is consistent with term reset behavior,
+    - asserts stale lower-term write attempts are rejected after failover.
+- `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+  - added the new failover-ordering test to focused scenario execution.
+  - expanded expected invariants with explicit failover sequencing checks.
+- `JEPSEN_PLAN.md`:
+  - documented the new explicit restart/failover ordering coverage.
+
+## v29 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep scenario-driven persistence coverage as the first isolation path for restart/failover regression investigation.
+  2. Expand failover ordering assertions toward explicit multi-backend restart matrices.
+  3. Continue treating scenario + aggregate artifact checks as hard gating criteria.
+- Medium-term:
+  1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+  2. Add committed-snapshot publication channels and durability telemetry.
+  3. Expand multi-node restart choreography and failback behavior checks.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move planner and persistence-profile selection into operator-facing registry surfaces.

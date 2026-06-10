@@ -1241,3 +1241,46 @@ Make all one-shot validation phases fail fast and fail the process on aggregate 
 1. Expand `MetadataLog` adapter catalog and policy hooks.
 2. Add retention/compaction tooling for durable metadata logs.
 3. Move planner and persistence-profile selection into operator-facing registry surfaces.
+
+## Plan Snapshot v29
+
+### Goal
+
+Extend persistence scenario coverage with explicit restart/failover ordering assertions.
+
+### Completed in this snapshot
+
+- `crates/ganglion-openraft/src/lib.rs`:
+  - added `persisted_node_failover_ordering_after_restart`:
+    - validates term-ordered failover from `node-a` to `node-b` over the same persisted path,
+    - asserts term bump/write ordering is applied on higher-term takeover,
+    - asserts stale proposals are rejected at term `< current_term` after failover.
+- `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+  - added `persisted_node_failover_ordering_after_restart` to the focused Rust coverage batch.
+  - expanded scenario invariants to include restart/failover leadership sequencing.
+- `JEPSEN_PLAN.md`:
+  - recorded the explicit restart/failover ordering assertion in the fallback scenario notes.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational reliability while extending coverage
+
+1. Keep scenario-level persistence coverage as the first isolation path for restart/failover regressions.
+2. Expand ordering checks to explicit multi-backend restart permutations where relevant.
+3. Keep one-shot validation and artifact checks as hard gates for persistence regressions.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport/runtime readiness
+
+1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+2. Add committed-snapshot publication channels and durability telemetry.
+3. Expand restart/failover scenarios with explicit multi-node term choreography.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Expand `MetadataLog` adapter catalog and policy hooks.
+2. Add retention/compaction tooling for durable metadata logs.
+3. Move planner and persistence-profile selection into operator-facing registry surfaces.
