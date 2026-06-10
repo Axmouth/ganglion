@@ -306,7 +306,10 @@ mod tests {
     use super::*;
     use ganglion_coordination::{CoordinationProvider, InMemoryCoordination};
     use ganglion_core::ResourceIdentity;
+    use proptest::prelude::*;
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::rc::Rc;
 
     #[test]
     fn in_memory_metadata_node_rejects_non_leader_updates() {
@@ -524,5 +527,164 @@ mod tests {
 
         assert!(matches!(result, Err(OpenraftAdapterError::NotLeader)));
         assert!(!published);
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_control_loop_publishing_and_rejection_matrix(
+            base_term in 1u64..6,
+            initial_generation in 0u64..6,
+            next_generation in 0u64..8,
+            proposer_choice in 0u8..3,
+            leader_choice in 0u8..3,
+            nodes_count in 1u8..4,
+        ) {
+            let mut base_nodes = BTreeMap::new();
+            for idx in 0..nodes_count {
+                let node_id = format!("node-{idx}");
+                base_nodes.insert(
+                    node_id.clone(),
+                    ganglion_core::NodeInfo::new(
+                        node_id,
+                        format!("127.0.0.1:{}", 10_000u16 + u16::from(idx)),
+                        None::<String>,
+                    ),
+                );
+            }
+
+            let node = InMemoryMetadataNode::new("node-a", CoordinationSnapshot {
+                generation: initial_generation,
+                ..CoordinationSnapshot::default()
+            });
+
+            let set_leader = match leader_choice {
+                0 => Some("node-a".to_string()),
+                1 => Some("node-b".to_string()),
+                _ => None,
+            };
+            if let Some(leader) = set_leader.as_deref() {
+                node.set_leader_term(leader, base_term);
+            } else {
+                node.clear_leader();
+            }
+
+            let proposer = match proposer_choice {
+                0 => "node-a",
+                1 => "node-b",
+                _ => "node-c",
+            };
+
+            let input = PlannerInput {
+                nodes: base_nodes,
+                resources: vec![ResourceIdentity::new("svc", "orders", 0, None::<String>)],
+                existing: BTreeMap::new(),
+                target_followers: 1,
+                generation: next_generation,
+            };
+
+            let published = Rc::new(RefCell::new(None::<CoordinationSnapshot>));
+            let publish_snapshot = published.clone();
+
+            let result = plan_and_publish(
+                &node,
+                proposer,
+                &DeterministicPartitionPlacement,
+                input,
+                move |snapshot| {
+                    *publish_snapshot.borrow_mut() = Some(snapshot);
+                },
+            );
+
+            let expected_error = if !matches!(leader_choice, 0 | 1) {
+                Some(OpenraftAdapterError::NotLeader)
+            } else if proposer != set_leader.as_deref().unwrap_or("") {
+                Some(OpenraftAdapterError::NotLeader)
+            } else if next_generation < initial_generation {
+                Some(OpenraftAdapterError::StaleGeneration)
+            } else {
+                None
+            };
+
+            match expected_error {
+                None => {
+                    prop_assert!(result.is_ok());
+                    let published = published.borrow();
+                    let snapshot = published.as_ref().expect("publish should occur on success");
+                    prop_assert_eq!(snapshot.generation, next_generation);
+                    prop_assert_eq!(node.snapshot().generation, next_generation);
+                    prop_assert_eq!(node.current_term(), base_term);
+                }
+                Some(ref expected_error) => {
+                    match result {
+                        Ok(_) => {
+                            prop_assert!(false, "expected rejection not success");
+                        }
+                        Err(actual_error) => {
+                            prop_assert_eq!(
+                                std::mem::discriminant(&actual_error),
+                                std::mem::discriminant(expected_error)
+                            );
+                        }
+                    }
+                    prop_assert!(published.borrow().is_none());
+                }
+            }
+        }
+
+        #[test]
+        fn fuzz_apply_snapshot_handles_term_and_generation_rejections(
+            base_term in 1u64..6,
+            use_term in prop::bool::ANY,
+            next_term in 0u64..8,
+            initial_generation in 0u64..6,
+            next_generation in 0u64..8,
+        ) {
+            let node = InMemoryMetadataNode::new(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: initial_generation,
+                    ..CoordinationSnapshot::default()
+                },
+            );
+            node.set_leader_term("node-a", base_term);
+
+            let snapshot = CoordinationSnapshot {
+                generation: next_generation,
+                ..CoordinationSnapshot::default()
+            };
+
+            let term = if use_term { Some(next_term) } else { None };
+            let expected_error = if let Some(term) = term {
+                if term < base_term {
+                    Some(OpenraftAdapterError::StaleTerm)
+                } else if next_generation < initial_generation {
+                    Some(OpenraftAdapterError::StaleGeneration)
+                } else {
+                    None
+                }
+            } else if next_generation < initial_generation {
+                Some(OpenraftAdapterError::StaleGeneration)
+            } else {
+                None
+            };
+
+            let result = node.apply_snapshot("node-a", snapshot, term);
+            match expected_error {
+                None => {
+                    prop_assert!(result.is_ok());
+                    prop_assert_eq!(node.snapshot().generation, next_generation);
+                    let expected_term = term.unwrap_or(base_term);
+                    prop_assert_eq!(node.current_term(), expected_term.max(base_term));
+                }
+                Some(expected_error) => {
+                    prop_assert!(matches!(
+                        result,
+                        Err(actual_error)
+                            if std::mem::discriminant(&actual_error)
+                                == std::mem::discriminant(&expected_error)
+                    ));
+                }
+            }
+        }
     }
 }

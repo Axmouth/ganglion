@@ -363,6 +363,14 @@ fn gather_followers(
     let mut cursor = 1usize;
     while followers.len() < target_followers {
         let candidate = &node_ids[(owner_index + cursor) % node_ids.len()];
+        if candidate == owner {
+            cursor = cursor.saturating_add(1);
+            if cursor > node_ids.len() * 2 {
+                break;
+            }
+            continue;
+        }
+
         if !ordered_unique.contains(candidate) {
             ordered_unique.insert(candidate.clone());
             followers.push(candidate.clone());
@@ -496,7 +504,8 @@ pub fn plan_local_assignment_transitions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn sample_nodes() -> BTreeMap<String, NodeInfo> {
         let mut nodes = BTreeMap::new();
@@ -513,6 +522,16 @@ mod tests {
             NodeInfo::new("node-c", "10.0.0.3:1111", None::<String>),
         );
         nodes
+    }
+
+    fn dedupe_values<T: Eq>(values: Vec<T>) -> Vec<T> {
+        let mut deduped = Vec::new();
+        for value in values {
+            if !deduped.contains(&value) {
+                deduped.push(value);
+            }
+        }
+        deduped
     }
 
     #[test]
@@ -639,5 +658,454 @@ mod tests {
         let transitions = plan_local_assignment_transitions("node-a", &previous, &next);
 
         assert!(transitions.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn fuzz_planner_invariants_with_random_inputs(
+            node_values in prop::collection::vec(1u16..4000, 1..8),
+            resource_values in prop::collection::vec(1u16..5000, 0..12),
+            target_followers in 0usize..10,
+        ) {
+            let mut nodes = BTreeMap::new();
+            for value in node_values {
+                let node_id = format!("node-{value}");
+                nodes.insert(
+                    node_id.clone(),
+                    NodeInfo::new(
+                        node_id.clone(),
+                        format!("127.0.0.1:{}", value),
+                        None::<String>,
+                    ),
+                );
+            }
+
+            let mut resources = Vec::new();
+            for value in resource_values {
+                let resource = ResourceIdentity::new(
+                    format!("ns-{value}"),
+                    format!("topic-{value}"),
+                    u64::from(value) % 4,
+                    None::<String>,
+                );
+                if !resources.contains(&resource) {
+                    resources.push(resource);
+                }
+            }
+
+            let input = PlacementInput {
+                nodes: nodes.clone(),
+                resources: resources.clone(),
+                existing: BTreeMap::new(),
+                target_followers,
+                generation: 1,
+            };
+
+            let plan = DeterministicPartitionPlacement
+                .plan(input.clone())
+                .expect("planner should succeed with nodes");
+
+            prop_assert_eq!(plan.snapshot.assignments.len(), resources.len());
+            for (resource, assignment) in &plan.snapshot.assignments {
+                prop_assert_eq!(&assignment.resource, resource);
+                prop_assert!(plan.snapshot.nodes.contains_key(&assignment.owner));
+
+                let follower_set_len = assignment.followers.iter().collect::<BTreeSet<&String>>().len();
+                let max_followers = plan.snapshot.nodes.len().saturating_sub(1);
+                prop_assert_eq!(follower_set_len, assignment.followers.len());
+                prop_assert!(assignment.followers.len() <= max_followers);
+                for follower in &assignment.followers {
+                    prop_assert_ne!(follower, &assignment.owner);
+                    prop_assert!(plan.snapshot.nodes.contains_key(follower));
+                }
+            }
+
+            let replay = DeterministicPartitionPlacement
+                .plan(input)
+                .expect("planner should be deterministic");
+            prop_assert_eq!(plan.snapshot, replay.snapshot);
+        }
+
+        #[test]
+        fn fuzz_planner_with_existing_assignments(
+            node_values in prop::collection::vec(1u16..4000, 1..8),
+            resource_values in prop::collection::vec(1u16..5000, 0..12),
+            owner_seed in prop::collection::vec(0u8..10, 12),
+            follower_selector in prop::collection::vec(0u8..10, 24),
+            follower_count_seed in prop::collection::vec(0u8..8, 12),
+            epoch_seed in prop::collection::vec(1u8..15, 12),
+            target_followers in 0usize..12,
+        ) {
+            let node_ids = dedupe_values(
+                node_values
+                    .into_iter()
+                    .map(|value| format!("node-{value}"))
+                    .collect(),
+            );
+
+            let nodes = node_ids
+                .iter()
+                .map(|node_id| {
+                    (
+                        node_id.clone(),
+                        NodeInfo::new(
+                            node_id.clone(),
+                            format!("127.0.0.1:{}", node_id.trim_start_matches("node-")),
+                            None::<String>,
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let sorted_node_ids = nodes.keys().cloned().collect::<Vec<_>>();
+            let mut resources = dedupe_values(
+                resource_values
+                    .into_iter()
+                    .map(|value| {
+                        ResourceIdentity::new(
+                            format!("ns-{value}"),
+                            format!("topic-{value}"),
+                            u64::from(value) % 7,
+                            None::<String>,
+                        )
+                    })
+                    .collect(),
+            );
+
+            resources.sort();
+
+            let mut existing = BTreeMap::new();
+            for (idx, resource) in resources.iter().enumerate() {
+                if owner_seed[idx % owner_seed.len()] % 2 == 0 {
+                    let owner_bucket = owner_seed[idx % owner_seed.len()] as usize % (node_ids.len() + 2);
+                    let owner = if owner_bucket < node_ids.len() {
+                        node_ids[owner_bucket].clone()
+                    } else {
+                        format!("ghost-owner-{idx}")
+                    };
+
+                    let max_followers = node_ids.len() + 2;
+                    let requested_followers = follower_count_seed[idx % follower_count_seed.len()] as usize;
+                    let follower_count = requested_followers % (max_followers + 2);
+
+                    let mut followers = Vec::with_capacity(follower_count);
+                    for follower_idx in 0..follower_count {
+                        let selector =
+                            follower_selector[(idx + follower_idx) % follower_selector.len()] as usize;
+                        let bucket = (selector + follower_idx) % (max_followers + 2);
+                        if bucket < node_ids.len() {
+                            followers.push(node_ids[bucket].clone());
+                        } else {
+                            followers.push(format!("ghost-follower-{idx}-{follower_idx}"));
+                        }
+                    }
+
+                    existing.insert(
+                        resource.clone(),
+                        PartitionAssignment {
+                            resource: resource.clone(),
+                            owner,
+                            followers,
+                            epoch: (epoch_seed[idx % epoch_seed.len()] as u64) % 20,
+                            durability: ReplicationDurabilityPolicy::LocalDurable,
+                        },
+                    );
+                }
+            }
+
+            let input = PlacementInput {
+                nodes: nodes.clone(),
+                resources: resources.clone(),
+                existing: existing.clone(),
+                target_followers,
+                generation: 1,
+            };
+
+            let plan = DeterministicPartitionPlacement
+                .plan(input.clone())
+                .expect("planner should succeed with nodes");
+
+            prop_assert_eq!(plan.snapshot.assignments.len(), resources.len());
+            for (idx, resource) in resources.iter().enumerate() {
+                let assignment = plan
+                    .snapshot
+                    .assignments
+                    .get(resource)
+                    .expect("assignment exists");
+                let existing_assignment = existing.get(resource);
+
+                let expected_owner = match existing_assignment {
+                    Some(existing) if input.nodes.contains_key(&existing.owner) => {
+                        existing.owner.clone()
+                    }
+                    _ => {
+                        let fallback_index = idx % sorted_node_ids.len();
+                        sorted_node_ids[fallback_index].clone()
+                    }
+                };
+                prop_assert_eq!(&assignment.owner, &expected_owner);
+
+                let expected_epoch = match existing_assignment {
+                    Some(existing) if existing.owner == expected_owner => existing.epoch,
+                    Some(existing) => existing.epoch.saturating_add(1),
+                    None => 1,
+                };
+                prop_assert_eq!(assignment.epoch, expected_epoch);
+
+                let follower_set_len =
+                    assignment.followers.iter().collect::<BTreeSet<&String>>().len();
+                let max_followers = node_ids.len().saturating_sub(1);
+                prop_assert_eq!(follower_set_len, assignment.followers.len());
+                prop_assert!(assignment.followers.len() <= max_followers);
+                prop_assert!(assignment.followers.len() <= target_followers);
+
+                let mut expected_from_existing = Vec::new();
+                let mut seen = BTreeSet::new();
+                if let Some(existing_assignment) = existing_assignment {
+                    for follower in &existing_assignment.followers {
+                        if follower == &expected_owner {
+                            continue;
+                        }
+                        if seen.contains(follower) {
+                            continue;
+                        }
+                        if !input.nodes.contains_key(follower) {
+                            continue;
+                        }
+
+                        seen.insert(follower.clone());
+                        expected_from_existing.push(follower.clone());
+                    }
+                }
+
+                let prefix = std::cmp::min(
+                    assignment.followers.len(),
+                    std::cmp::min(expected_from_existing.len(), target_followers),
+                );
+                for prefix_idx in 0..prefix {
+                    prop_assert_eq!(
+                        &assignment.followers[prefix_idx],
+                        &expected_from_existing[prefix_idx]
+                    );
+                }
+
+                for follower in &assignment.followers {
+                    prop_assert_ne!(follower, &assignment.owner);
+                    prop_assert!(input.nodes.contains_key(follower));
+                }
+            }
+
+            let replay = DeterministicPartitionPlacement
+                .plan(input)
+                .expect("planner should be deterministic");
+            prop_assert_eq!(plan.snapshot, replay.snapshot);
+        }
+
+        #[test]
+        fn fuzz_plan_local_assignment_transitions_follow_role_semantics(
+            node_values in prop::collection::vec(1u16..4000, 1..8),
+            resource_values in prop::collection::vec(1u16..5000, 0..12),
+        ) {
+            let node_ids = dedupe_values(
+                node_values
+                    .into_iter()
+                    .map(|value| format!("node-{value}"))
+                    .collect(),
+            );
+            prop_assume!(!node_ids.is_empty());
+
+            let resources = dedupe_values(
+                resource_values
+                    .into_iter()
+                    .map(|value| {
+                        ResourceIdentity::new(
+                            format!("ns-{value}"),
+                            format!("topic-{value}"),
+                            u64::from(value) % 7,
+                            None::<String>,
+                        )
+                    })
+                    .collect(),
+            );
+            prop_assume!(!resources.is_empty());
+
+            let mut previous = CoordinationSnapshot {
+                nodes: node_ids.iter().map(|node_id| {
+                    (
+                        node_id.clone(),
+                        NodeInfo::new(
+                            node_id.clone(),
+                            format!("127.0.0.1:{}", node_id.trim_start_matches("node-")),
+                            None::<String>,
+                        ),
+                    )
+                }).collect(),
+                ..CoordinationSnapshot::default()
+            };
+            let mut next = previous.clone();
+
+            let node_count = node_ids.len();
+            for (idx, resource) in resources.iter().enumerate() {
+                let prev_selector = idx % 3;
+                match prev_selector {
+                    1 => {
+                        let owner = node_ids[idx % node_count].clone();
+                        previous.assignments.insert(
+                            resource.clone(),
+                            PartitionAssignment::new(
+                                resource.clone(),
+                                owner,
+                                vec![],
+                                1 + (idx as u64 % 4),
+                            ),
+                        );
+                    }
+                    2 => {
+                        let follower = node_ids[(idx + 1) % node_count].clone();
+                        previous.assignments.insert(
+                            resource.clone(),
+                            PartitionAssignment::new(
+                                resource.clone(),
+                                "other-node".to_string(),
+                                vec![follower],
+                                1 + (idx as u64 % 4),
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+
+                let next_selector = (idx + 2) % 3;
+                match next_selector {
+                    1 => {
+                        let owner = node_ids[(idx + 2) % node_count].clone();
+                        next.assignments.insert(
+                            resource.clone(),
+                            PartitionAssignment::new(
+                                resource.clone(),
+                                owner,
+                                vec![],
+                                10 + idx as u64,
+                            ),
+                        );
+                    }
+                    2 => {
+                        let follower = node_ids[(idx + 3) % node_count].clone();
+                        next.assignments.insert(
+                            resource.clone(),
+                            PartitionAssignment::new(
+                                resource.clone(),
+                                "other-node".to_string(),
+                                vec![follower],
+                                10 + idx as u64,
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            for node_id in &node_ids {
+                let transitions = plan_local_assignment_transitions(node_id, &previous, &next);
+                let resource_count = resources.len();
+                prop_assert!(transitions.len() <= resource_count);
+
+                let mut seen = BTreeSet::new();
+                for transition in transitions.iter() {
+                    let transition_resource = match transition {
+                        LocalTransition::KeepOwner { resource } => resource,
+                        LocalTransition::KeepFollower { resource } => resource,
+                        LocalTransition::PromoteFollowerToOwner { resource, .. } => resource,
+                        LocalTransition::DemoteOwnerToFollower { resource, .. } => resource,
+                        LocalTransition::StopServing { resource, .. } => resource,
+                    };
+
+                    match transition {
+                        LocalTransition::KeepOwner { resource } => {
+                            prop_assert_eq!(local_assignment_role(&previous, node_id, resource), LocalRole::Owner);
+                            prop_assert_eq!(local_assignment_role(&next, node_id, resource), LocalRole::Owner);
+                        }
+                        LocalTransition::KeepFollower { resource } => {
+                            let prev = local_assignment_role(&previous, node_id, resource);
+                            let next_role = local_assignment_role(&next, node_id, resource);
+                            prop_assert!(
+                                matches!(
+                                    (prev, next_role),
+                                    (LocalRole::Follower, LocalRole::Follower)
+                                        | (LocalRole::None, LocalRole::Follower)
+                                )
+                            );
+                        }
+                        LocalTransition::PromoteFollowerToOwner { resource, to_epoch } => {
+                            prop_assert_eq!(local_assignment_role(&next, node_id, resource), LocalRole::Owner);
+                            let expected_epoch = next.assignment_for(&resource).map_or(1, |assignment| assignment.epoch);
+                            prop_assert_eq!(*to_epoch, expected_epoch);
+                        }
+                        LocalTransition::DemoteOwnerToFollower { resource, from_epoch, to_epoch } => {
+                            prop_assert_eq!(local_assignment_role(&previous, node_id, resource), LocalRole::Owner);
+                            prop_assert_eq!(local_assignment_role(&next, node_id, resource), LocalRole::Follower);
+                            let from = previous.assignment_for(&resource).map_or(0, |assignment| assignment.epoch);
+                            let to = next.assignment_for(&resource).map_or(from, |assignment| assignment.epoch);
+                            prop_assert_eq!(*from_epoch, from);
+                            prop_assert_eq!(*to_epoch, to);
+                        }
+                        LocalTransition::StopServing { resource, was_owner } => {
+                            let next_role = local_assignment_role(&next, node_id, resource);
+                            if *was_owner {
+                                prop_assert_eq!(
+                                    local_assignment_role(&previous, node_id, resource),
+                                    LocalRole::Owner
+                                );
+                            } else {
+                                prop_assert_eq!(
+                                    local_assignment_role(&previous, node_id, resource),
+                                    LocalRole::Follower
+                                );
+                            }
+                            prop_assert_eq!(next_role, LocalRole::None);
+                        }
+                    }
+
+                    seen.insert(transition_resource.clone());
+                }
+                prop_assert_eq!(seen.len(), transitions.len());
+            }
+        }
+
+        #[test]
+        fn fuzz_planner_rejects_empty_cluster_with_resources(
+            resource_values in prop::collection::vec(1u16..5000, 1..12),
+        ) {
+            let resources = resource_values
+                .into_iter()
+                .map(|value| {
+                    ResourceIdentity::new(
+                        format!("ns-{value}"),
+                        format!("topic-{value}"),
+                        u64::from(value) % 7,
+                        None::<String>,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut deduped_resources = Vec::new();
+            for resource in resources {
+                if !deduped_resources.contains(&resource) {
+                    deduped_resources.push(resource);
+                }
+            }
+            prop_assume!(!deduped_resources.is_empty());
+
+            let input = PlacementInput {
+                nodes: BTreeMap::new(),
+                resources: deduped_resources,
+                existing: BTreeMap::new(),
+                target_followers: 1,
+                generation: 1,
+            };
+
+            let err = DeterministicPartitionPlacement
+                .plan(input)
+                .expect_err("empty node set should reject active resources");
+            prop_assert!(matches!(err, PlacementError::NoNodesForResources));
+        }
     }
 }

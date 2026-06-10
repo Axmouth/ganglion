@@ -126,3 +126,48 @@ This file is the detailed history of everything done in this repo, modeled after
   - Re-ran full workspace tests with `cargo test --all-targets --workspace --quiet`.
   - Re-sanitized docs to keep plan/worklog append-only and roadmap entries time-free.
   - Verified API surface documentation to include control-loop helper.
+
+## v6 execution pass started
+
+- `.gitignore`
+  - Added a Rust-oriented ignore file with `target/` and fuzz artifacts.
+
+- `ganglion-core` fuzzing start
+  - Added `proptest` as dev dependency.
+  - Added property-based tests for planner invariants:
+    - no unknown owners/followers in planned assignment
+    - followers stay unique and never include owner
+    - deterministic output under duplicate scheduling inputs
+  - Added explicit empty-cluster-with-resources rejection property.
+  - Ran fuzzed property checks and tightened planner follower construction to skip owners in follower lists.
+
+- Validation / direction
+  - Captured explicit next steps to stand up Jepsen-style failure tests for openraft consensus behavior.
+
+## v7 execution pass started
+
+- `ganglion-core` fuzz expansion:
+  - Added property tests for planner behavior when existing assignments are present, including:
+    - stale/dead owners handling,
+    - epoch carry-forward vs increment semantics,
+    - follower reuse ordering and uniqueness constraints under random snapshots,
+    - empty/noisy follower list handling.
+  - Added property tests for `plan_local_assignment_transitions` over synthetic random snapshot pairs:
+    - uniqueness and bounded resource transitions,
+    - consistency between inferred role transitions and emitted transition enum.
+- `ganglion-openraft` fuzzing:
+  - Added `proptest` dev dependency.
+  - Added property test that fuzzes proposer choice, leader assignment, and generation under control-loop execution.
+  - The test checks publish-on-success and explicit failure on:
+    - non-leader proposals,
+    - stale generations.
+  - Added property test for direct `apply_snapshot` term behavior:
+    - stale term rejection,
+    - stale generation rejection,
+    - acceptance when term is equal or newer.
+- Documentation:
+  - Added `JEPSEN_PLAN.md` with concrete scenario list and observable acceptance criteria for eventual Jepsen work.
+  - Expanded `.gitignore` with additional Rust workspace and tooling ignores.
+
+- Validation:
+  - Updated `PLAN.md` with `Plan Snapshot v7`.

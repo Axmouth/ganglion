@@ -8,3 +8,4 @@ ganglion-core = { path = "../ganglion-core" }
 
 [dev-dependencies]
 ganglion-coordination = { path = "../ganglion-coordination" }
+proptest = "1"

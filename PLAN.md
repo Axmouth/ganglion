@@ -224,3 +224,58 @@ Complete the v4 control-loop minimum and document where to continue.
 1. Introduce pluggable persistence abstractions (storage traits / log adapters) that can be implemented by Keratin.
 2. Replace the in-memory consensus node with a real openraft-backed implementation behind the same `MetadataConsensus` trait.
 3. Add a controller-facing crate utility that wires planning, consensus proposal, and watch notification into a reusable loop.
+
+## Plan Snapshot v6
+
+### Goal
+
+Strengthen reliability and fault-injection confidence before introducing real openraft/keratin.
+
+### Completed in this snapshot
+
+- Added Rust `.gitignore` entries for build artifacts and fuzz-related outputs.
+- Added initial property-based fuzzing coverage for the planner in `ganglion-core` using `proptest`.
+- Added test scaffolding to keep the empty-cluster failure path explicit:
+  - non-empty resources with no nodes are rejected by planner.
+- Tightened planner follower invariants:
+  - follower selection now guarantees followers are unique and never include owner.
+- Captured validation direction for external fault-injection:
+  - add Jepsen-style cluster tests in a separate test harness.
+
+### Next low-resolution steps
+
+1. Add more fuzz targets:
+   - planner with `existing` assignments as input
+   - `plan_local_assignment_transitions` consistency under random snapshot pairs
+   - `control_loop` failure modes across proposer identity and stale generations
+2. Stand up a shared Jepsen scenario scaffold (binary + scripts) for openraft failover/rejoin/partition cases.
+3. Add a keratin-backed storage adapter behind new persistence traits, then wire it into `InMemoryMetadataNode` integration tests as a replacement path.
+
+## Plan Snapshot v7
+
+### Goal
+
+Increase confidence breadth before moving to real transport/storage and keep test scaffolding actionable.
+
+### Completed in this snapshot
+
+- Added deeper fuzz coverage to `ganglion-core`:
+  - planner behavior with randomized existing assignments,
+  - local transition consistency checks over randomized previous/next snapshots,
+  - preservation of follower ordering where existing follower assignment can be reused.
+- Added fuzz coverage for `ganglion-openraft` control-loop rejection matrix:
+  - rejects non-leader proposals,
+  - rejects stale generations after leader/proposer validation.
+- Added fuzz coverage for direct `apply_snapshot` term handling:
+  - stale term rejection,
+  - stale generation rejection,
+  - acceptance with equal/newer term overrides.
+- Added Jepsen planning artifact:
+  - `JEPSEN_PLAN.md` with scenario scaffolding and acceptance checks.
+- Expanded `.gitignore` Rust/dev-ignore coverage for IDE/temp/fuzzer artifacts.
+
+### Next in this sequence
+
+1. Add persistent proptest regression capture and replay tooling (`proptest-regressions/` conventions in CI).
+2. Materialize the Jepsen scaffold directory with commandable scenarios and a CI gateable target.
+3. Implement the Keratin-backed persistence adapter and run the same fuzz/control-loop suites through it.

@@ -1,0 +1,33 @@
+target/
+**/target/
+
+# Rust tooling
+*.rs.bk
+*.lock.bk
+*.log
+
+# Test artifacts
+coverage/
+**/coverage/
+*.profraw
+*.profdata
+*.lcov
+*.trc
+*.gcda
+*.gcno
+
+# Fuzzing
+/fuzz/
+/fuzz-artifacts/
+**/fuzz/
+**/fuzz-artifacts/
+**/proptest-regressions/
+
+# Tooling / IDE
+.idea/
+.vscode/
+*.tmp
+*.swp
+*.swo
+*.pid
+*.json
