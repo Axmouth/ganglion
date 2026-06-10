@@ -21,11 +21,16 @@ Use:
 - `scripts/jepsen.sh all` (CI-targetable wrapper).
 - `scripts/validate.sh` (runs fmt, tests, proptests, and all Jepsen scenarios).
   It writes `validate-summary.json` under the chosen artifact directory with run and replay-profile metadata.
+  Replay-profile metadata includes:
+  - `value` (raw env var if set)
+  - `effective` (resolved value)
+  - `source` (`environment` if env var was set, otherwise `default`).
 
 `scripts/validate.sh` is the preferred one-shot local/CI validation path.  
 It accepts:
 - `--skip-fmt`
 - `--skip-tests`
+- `--skip-startup-smoke`
 - `--skip-fuzz`
 - `--skip-jepsen`
 - `--jepsen-artifact-dir <path>`
@@ -36,11 +41,14 @@ Environment variable:
 If Clojure/Jepsen is not available in the environment, scenario scripts will emit
 `SKIPPED` and still write a log file so orchestration can continue.
 
+`validate-summary.json` also includes `startup_smoke` with `requested` and `result` fields (`pass`/`skipped`/`fail` behavior), aligned with other run phases.
+
 ## Scenario inventory
 
 - `01-baseline-failover.sh`
 - `02-partition-split-brain.sh`
 - `03-crash-recovery.sh`
+- `04-startup-entrypoint-smoke.sh`
 
 ## Current status
 

@@ -88,14 +88,8 @@ impl PersistedMetadataReplayProfile {
     }
 
     pub fn from_env_var() -> Result<Self, OpenraftAdapterError> {
-        match std::env::var(Self::ENV_REPLAY_PROFILE) {
-            Ok(raw) => raw.parse::<Self>(),
-            Err(std::env::VarError::NotPresent) => Ok(Self::Default),
-            Err(error) => Err(OpenraftAdapterError::Config(format!(
-                "failed to read {}: {error}",
-                Self::ENV_REPLAY_PROFILE
-            ))),
-        }
+        PersistedMetadataReplayProfileResolution::from_env_or_default()
+            .map(|resolution| resolution.profile)
     }
 }
 
@@ -140,6 +134,66 @@ impl std::str::FromStr for PersistedMetadataReplayProfile {
                     "invalid persisted replay profile `{raw}`: {error}"
                 ))
             })
+    }
+}
+
+/// Source chosen for startup replay-profile configuration.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PersistedMetadataReplayProfileSource {
+    /// Missing environment variable / explicit override.
+    Default,
+    /// Loaded from `GANGLION_PERSISTED_REPLAY_PROFILE`.
+    Environment,
+    /// Explicitly provided by adapter construction config.
+    Explicit,
+}
+
+/// Structured startup profile resolution including provenance.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct PersistedMetadataReplayProfileResolution {
+    /// Chosen replay profile.
+    pub profile: PersistedMetadataReplayProfile,
+    /// Where that choice came from.
+    pub source: PersistedMetadataReplayProfileSource,
+}
+
+impl PersistedMetadataReplayProfileResolution {
+    pub fn from_profile(profile: PersistedMetadataReplayProfile) -> Self {
+        Self {
+            profile,
+            source: PersistedMetadataReplayProfileSource::Explicit,
+        }
+    }
+
+    pub fn from_env_or_default() -> Result<Self, OpenraftAdapterError> {
+        match std::env::var(PersistedMetadataReplayProfile::env_var_name()) {
+            Ok(raw) => Ok(Self {
+                profile: raw.parse::<PersistedMetadataReplayProfile>()?,
+                source: PersistedMetadataReplayProfileSource::Environment,
+            }),
+            Err(std::env::VarError::NotPresent) => Ok(Self {
+                profile: PersistedMetadataReplayProfile::Default,
+                source: PersistedMetadataReplayProfileSource::Default,
+            }),
+            Err(error) => Err(OpenraftAdapterError::Config(format!(
+                "failed to read {}: {error}",
+                PersistedMetadataReplayProfile::env_var_name()
+            ))),
+        }
+    }
+
+    pub fn from_explicit_or_env(explicit: Option<&str>) -> Result<Self, OpenraftAdapterError> {
+        match explicit {
+            Some(raw) => Ok(Self {
+                profile: raw.parse::<PersistedMetadataReplayProfile>()?,
+                source: PersistedMetadataReplayProfileSource::Explicit,
+            }),
+            None => Self::from_env_or_default(),
+        }
+    }
+
+    pub fn replay_profile(&self) -> PersistedMetadataReplayProfile {
+        self.profile
     }
 }
 
@@ -502,6 +556,27 @@ impl PersistedMetadataNode {
         )
     }
 
+    pub fn new_with_replay_profile_resolution<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        startup_profile: PersistedMetadataReplayProfileResolution,
+    ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_replay_profile(path, node_id, initial_snapshot, startup_profile.profile)
+    }
+
+    pub fn new_with_replay_profile_str<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        raw_profile: Option<&str>,
+    ) -> Result<(Self, PersistedMetadataReplayProfileResolution), OpenraftAdapterError> {
+        let resolved = PersistedMetadataReplayProfileResolution::from_explicit_or_env(raw_profile)?;
+        let node =
+            Self::new_with_replay_profile(path, node_id, initial_snapshot, resolved.profile)?;
+        Ok((node, resolved))
+    }
+
     pub fn new_with_tail_replay_limit<P: Into<std::path::PathBuf>>(
         path: P,
         node_id: impl Into<String>,
@@ -521,8 +596,8 @@ impl PersistedMetadataNode {
         node_id: impl Into<String>,
         initial_snapshot: CoordinationSnapshot,
     ) -> Result<Self, OpenraftAdapterError> {
-        let replay_profile = PersistedMetadataReplayProfile::from_env_var()?;
-        Self::new_with_replay_profile(path, node_id, initial_snapshot, replay_profile)
+        let resolved = PersistedMetadataReplayProfileResolution::from_env_or_default()?;
+        Self::new_with_replay_profile_resolution(path, node_id, initial_snapshot, resolved)
     }
 
     pub fn new_from_env<P: Into<std::path::PathBuf>>(
@@ -815,6 +890,67 @@ mod tests {
         nodes
     }
 
+    fn build_valid_corruption_tail_lines(tail_pattern: Vec<u8>) -> (Vec<u8>, usize) {
+        let mut tail_payload = Vec::new();
+        let mut malformed_count = 0usize;
+
+        for symbol in tail_pattern {
+            match symbol {
+                0 => {
+                    tail_payload.extend_from_slice(b"{bad-json}\n");
+                    malformed_count += 1;
+                }
+                1 => {
+                    tail_payload.extend_from_slice(b"# comment line\n");
+                }
+                _ => {
+                    tail_payload.extend_from_slice(b"\n");
+                }
+            }
+        }
+
+        (tail_payload, malformed_count)
+    }
+
+    fn prepare_persisted_log_with_corruption_tail(
+        path: &std::path::Path,
+        base_entries: u8,
+        tail_pattern: Vec<u8>,
+    ) -> std::io::Result<()> {
+        let path = path.to_path_buf();
+        {
+            let node =
+                PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+                    })?;
+            node.set_leader("node-a");
+            for generation in 1..=base_entries {
+                let snapshot = CoordinationSnapshot {
+                    generation: generation as u64,
+                    ..CoordinationSnapshot::default()
+                };
+                node.apply_snapshot("node-a", snapshot, None)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::Other, error.to_string())
+                    })?;
+            }
+        }
+
+        let (tail_payload, _) = build_valid_corruption_tail_lines(tail_pattern);
+        if !tail_payload.is_empty() {
+            use std::io::Write as _;
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+                .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))?;
+            file.write_all(&tail_payload)?;
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn parse_persisted_replay_profile_values() {
         assert_eq!(
@@ -861,6 +997,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_profile_resolution_prefers_explicit_over_env() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let resolved = PersistedMetadataReplayProfileResolution::from_explicit_or_env(Some("2"))
+            .expect("explicit profile should parse");
+        assert_eq!(
+            resolved.profile,
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 }
+        );
+        assert_eq!(
+            resolved.source,
+            PersistedMetadataReplayProfileSource::Explicit
+        );
+
+        let fallback = PersistedMetadataReplayProfileResolution::from_explicit_or_env(None)
+            .expect("missing explicit profile should fall back to env/default");
+        assert_eq!(fallback.profile, PersistedMetadataReplayProfile::Strict);
+        assert_eq!(
+            fallback.source,
+            PersistedMetadataReplayProfileSource::Environment
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
+    }
+
+    #[test]
     fn persisted_node_startup_profile_is_resolved_and_diagnostics_available() {
         let default_node = PersistedMetadataNode::new(
             unique_temp_path("profile-default"),
@@ -901,6 +1069,207 @@ mod tests {
             custom_node.startup_replay_profile(),
             PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 4 }
         );
+    }
+
+    #[test]
+    fn persisted_node_new_with_replay_profile_str_and_resolution() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let (explicit_node, explicit_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                unique_temp_path("profile-resolution-explicit"),
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("7"),
+            )
+            .expect("explicit profile should construct node");
+        assert_eq!(
+            explicit_resolution.source,
+            PersistedMetadataReplayProfileSource::Explicit
+        );
+        assert_eq!(
+            explicit_resolution.profile,
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 7 }
+        );
+        assert_eq!(
+            explicit_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 7 }
+        );
+
+        let (fallback_node, fallback_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                unique_temp_path("profile-resolution-env"),
+                "node-a",
+                CoordinationSnapshot::default(),
+                None,
+            )
+            .expect("env/default profile should construct node");
+        assert_eq!(
+            fallback_resolution.source,
+            PersistedMetadataReplayProfileSource::Environment
+        );
+        assert_eq!(
+            fallback_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
+    }
+
+    #[test]
+    fn persisted_node_startup_entrypoint_smoke_checks() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let initial_snapshot = CoordinationSnapshot::default();
+
+        let default_node = PersistedMetadataNode::new(
+            unique_temp_path("startup-entrypoints-new"),
+            "node-a",
+            initial_snapshot.clone(),
+        )
+        .expect("default startup constructor should work");
+        assert_eq!(
+            default_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Default
+        );
+
+        let strict_node = PersistedMetadataNode::new_strict(
+            unique_temp_path("startup-entrypoints-strict"),
+            "node-a",
+            initial_snapshot.clone(),
+        )
+        .expect("strict startup constructor should work");
+        assert_eq!(
+            strict_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        let explicit_tail_node = PersistedMetadataNode::new_with_replay_profile(
+            unique_temp_path("startup-entrypoints-profile"),
+            "node-a",
+            initial_snapshot.clone(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 3 },
+        )
+        .expect("replay-profile constructor should work");
+        assert_eq!(
+            explicit_tail_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 3 }
+        );
+
+        let resolved_profile = PersistedMetadataReplayProfileResolution::from_profile(
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 },
+        );
+        let resolved_node = PersistedMetadataNode::new_with_replay_profile_resolution(
+            unique_temp_path("startup-entrypoints-profile-resolution"),
+            "node-a",
+            initial_snapshot.clone(),
+            resolved_profile,
+        )
+        .expect("resolved-profile constructor should work");
+        assert_eq!(
+            resolved_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 }
+        );
+
+        let (explicit_node, explicit_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                unique_temp_path("startup-entrypoints-profile-str-explicit"),
+                "node-a",
+                initial_snapshot.clone(),
+                Some("7"),
+            )
+            .expect("explicit-profile-string constructor should work");
+        assert_eq!(
+            explicit_resolution,
+            PersistedMetadataReplayProfileResolution {
+                profile: PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 7 },
+                source: PersistedMetadataReplayProfileSource::Explicit
+            }
+        );
+        assert_eq!(
+            explicit_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 7 }
+        );
+
+        let (env_node, env_resolution) = PersistedMetadataNode::new_with_replay_profile_str(
+            unique_temp_path("startup-entrypoints-profile-str-env"),
+            "node-a",
+            initial_snapshot.clone(),
+            None,
+        )
+        .expect("env-backed constructor should work");
+        assert_eq!(
+            env_resolution.source,
+            PersistedMetadataReplayProfileSource::Environment
+        );
+        assert_eq!(
+            env_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        let from_env_node = PersistedMetadataNode::new_from_env(
+            unique_temp_path("startup-entrypoints-from-env"),
+            "node-a",
+            initial_snapshot.clone(),
+        )
+        .expect("from_env constructor should work");
+        assert_eq!(
+            from_env_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        let from_env_alias_node = PersistedMetadataNode::new_with_profile_env(
+            unique_temp_path("startup-entrypoints-with-profile-env"),
+            "node-a",
+            initial_snapshot.clone(),
+        )
+        .expect("new_with_profile_env constructor should work");
+        assert_eq!(
+            from_env_alias_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        let strict_with_policy_node = PersistedMetadataNode::new_with_replay_policy(
+            unique_temp_path("startup-entrypoints-policy"),
+            "node-a",
+            initial_snapshot.clone(),
+            FileMetadataReplayPolicy::Strict,
+        )
+        .expect("policy constructor should work");
+        assert_eq!(
+            strict_with_policy_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+        assert_eq!(
+            strict_with_policy_node.startup_replay_policy(),
+            FileMetadataReplayPolicy::Strict
+        );
+
+        let limited_tail_node = PersistedMetadataNode::new_with_tail_replay_limit(
+            unique_temp_path("startup-entrypoints-tail-limit"),
+            "node-a",
+            initial_snapshot.clone(),
+            5,
+        )
+        .expect("tail-limit constructor should work");
+        assert_eq!(
+            limited_tail_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 5 }
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
     }
 
     #[test]
@@ -1525,9 +1894,54 @@ mod tests {
         }
 
         #[test]
-    fn fuzz_control_loop_publishing_and_rejection_matrix(
-        base_term in 1u64..6,
-        initial_generation in 0u64..6,
+        fn fuzz_persisted_replay_tail_recovery_is_bound_by_tail_limit(
+            base_entries in 0u8..20,
+            max_tail in 0u8..20,
+            tail_lines in proptest::collection::vec(0u8..3, 0..30),
+        ) {
+            let malformed_tail_count = tail_lines.iter().filter(|symbol| **symbol == 0).count();
+            let path = unique_temp_path("fuzz-tail-recovery");
+            prepare_persisted_log_with_corruption_tail(
+                &path,
+                base_entries,
+                tail_lines.clone(),
+            )
+            .expect("test setup should build persisted log");
+
+            let result = PersistedMetadataNode::new_with_replay_profile(
+                path,
+                "node-a",
+                CoordinationSnapshot::default(),
+                PersistedMetadataReplayProfile::TruncateTail {
+                    max_tail_lines: max_tail as usize,
+                },
+            );
+
+            match result {
+                Ok(node) => {
+                    prop_assert!(malformed_tail_count <= max_tail as usize);
+                    prop_assert_eq!(node.snapshot().generation, base_entries as u64);
+                }
+                Err(OpenraftAdapterError::Storage(_)) => {
+                    prop_assert!(malformed_tail_count > max_tail as usize);
+                }
+                Err(OpenraftAdapterError::Config(_)) => {
+                    prop_assert!(false, "config errors are not expected for replay constructor");
+                }
+                Err(OpenraftAdapterError::Planner(_))
+                | Err(OpenraftAdapterError::PoisonedState)
+                | Err(OpenraftAdapterError::NotLeader)
+                | Err(OpenraftAdapterError::StaleGeneration)
+                | Err(OpenraftAdapterError::StaleTerm) => {
+                    prop_assert!(false, "unexpected constructor error variant");
+                }
+            }
+        }
+
+        #[test]
+        fn fuzz_control_loop_publishing_and_rejection_matrix(
+            base_term in 1u64..6,
+            initial_generation in 0u64..6,
         next_generation in 0u64..8,
             proposer_choice in 0u8..3,
             leader_choice in 0u8..3,

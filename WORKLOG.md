@@ -322,6 +322,71 @@ This file is the detailed history of everything done in this repo, modeled after
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
 
+## v16 execution pass completed
+
+- Validation scaffolding:
+  - Added a new startup constructor smoke test:
+    - `persisted_node_startup_entrypoint_smoke_checks`
+    - Covers all persisted startup constructors and verifies resolved profile outputs.
+  - Added dedicated fallback scenario:
+    - `tests/jepsen/scenarios/04-startup-entrypoint-smoke.sh`
+  - Extended `scripts/validate.sh` with startup constructor smoke execution:
+    - `startup_smoke` phase and `--skip-startup-smoke` flag
+    - `startup_smoke` result entry in `validate-summary.json`
+- Docs:
+  - Updated `tests/jepsen/README.md` scenario inventory.
+- Checks:
+  - Confirmed env-driven constructors and explicit overrides still agree with source and effective profile expectations.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add startup-policy selection coverage for explicit profile transitions under mixed valid tails.
+  2. Extend constructor smoke to include immediate control-loop restart replay paths.
+  3. Keep source/target matrix for constructor precedence and profile-failure modes in docs and tests.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same contracts.
+  2. Introduce committed-snapshot event stream for controllers and watchers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and migration tooling.
+  3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v15 execution pass completed
+
+- `ganglion-openraft`:
+  - Added mixed-tail persisted recovery fuzzing:
+    - writes valid-prefix startup logs and variable tail patterns (malformed, blank, comments),
+    - asserts boundary behavior where malformed-tail counts determine recovery/rejection with `new_with_replay_profile`.
+  - Added startup profile provenance plumbing:
+    - `PersistedMetadataReplayProfileSource` (`Explicit`, `Environment`, `Default`),
+    - `PersistedMetadataReplayProfileResolution` (`profile` plus resolution source),
+    - `PersistedMetadataNode::new_with_replay_profile_str` returning resolved profile metadata.
+  - Added tests for precedence and visibility:
+    - explicit profile string overrides env,
+    - env-based resolution is used when explicit override is absent,
+    - resolved startup profile is visible from constructor result and startup diagnostics.
+
+- Validation:
+  - Full validation path (`./scripts/validate.sh`) remains green with the new tests.
+  - Jepsen fallback smoke checks continue to run from the one-shot validator.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add constructor/diagnostic smoke checks for every persisted startup entrypoint in validation scripts.
+  2. Add persisted recovery fuzz cases for mixed valid tail corruption and boundary-limit transitions in startup policy selection.
+  3. Track resolved startup profile source in CI artifacts where possible.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+  2. Introduce committed-snapshot publication plumbing for external controllers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Expand backend adapters and migration plans beyond basic file logs.
+
 ## v11 execution pass completed
 
 - `PersistedMetadataNode` startup policy:

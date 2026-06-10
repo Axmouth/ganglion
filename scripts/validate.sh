@@ -5,12 +5,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JEPSEN_ARTIFACT_DIR="${ROOT_DIR}/tests/jepsen/artifacts/validate-run"
 RUN_FMT=true
 RUN_TESTS=true
+RUN_STARTUP_SMOKE=true
 RUN_PROPT=true
 RUN_JEPSEN=true
 
 PERSISTED_REPLAY_PROFILE_ENV="GANGLION_PERSISTED_REPLAY_PROFILE"
 SUMMARY_FMT="skipped"
 SUMMARY_TESTS="skipped"
+SUMMARY_STARTUP_SMOKE="skipped"
 SUMMARY_PROPT="skipped"
 SUMMARY_JEPSEN="skipped"
 
@@ -22,6 +24,7 @@ Usage:
 Options:
   --skip-fmt              skip cargo fmt --all --check
   --skip-tests            skip cargo test --workspace --quiet
+  --skip-startup-smoke    skip persisted startup-entrypoint smoke check
   --skip-fuzz             skip scripts/proptest.sh run
   --skip-jepsen           skip tests/jepsen/run.sh all
   --jepsen-artifact-dir P artifacts directory for jepsen scenario logs
@@ -46,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tests)
       RUN_TESTS=false
+      shift
+      ;;
+    --skip-startup-smoke)
+      RUN_STARTUP_SMOKE=false
       shift
       ;;
     --skip-fuzz)
@@ -88,6 +95,12 @@ run_tests() {
   SUMMARY_TESTS="pass"
 }
 
+run_startup_smoke() {
+  echo "validate: cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet"
+  cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet
+  SUMMARY_STARTUP_SMOKE="pass"
+}
+
 run_proptest() {
   echo "validate: scripts/proptest.sh run"
   bash "$ROOT_DIR/scripts/proptest.sh" run
@@ -108,6 +121,10 @@ write_summary() {
   if [[ "$replay_profile_effective" == "<unset>" ]]; then
     replay_profile_effective="default"
   fi
+  local replay_profile_source="default"
+  if [[ -n "${!PERSISTED_REPLAY_PROFILE_ENV+x}" ]]; then
+    replay_profile_source="environment"
+  fi
 
   cat <<EOF > "$summary_file"
 {
@@ -117,7 +134,8 @@ write_summary() {
   "replay_profile": {
     "env_var": "$PERSISTED_REPLAY_PROFILE_ENV",
     "value": "$replay_profile_raw",
-    "effective": "$replay_profile_effective"
+    "effective": "$replay_profile_effective",
+    "source": "$replay_profile_source"
   },
   "runs": {
     "fmt": {
@@ -127,6 +145,10 @@ write_summary() {
     "tests": {
       "requested": $RUN_TESTS,
       "result": "$SUMMARY_TESTS"
+    },
+    "startup_smoke": {
+      "requested": $RUN_STARTUP_SMOKE,
+      "result": "$SUMMARY_STARTUP_SMOKE"
     },
     "proptest": {
       "requested": $RUN_PROPT,
@@ -148,6 +170,10 @@ fi
 
 if [[ "$RUN_TESTS" == true ]]; then
   run_tests
+fi
+
+if [[ "$RUN_STARTUP_SMOKE" == true ]]; then
+  run_startup_smoke
 fi
 
 if [[ "$RUN_PROPT" == true ]]; then

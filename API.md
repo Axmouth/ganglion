@@ -85,6 +85,14 @@ This file tracks what each part of the current scaffolding is meant to do.
   - `Default` (`TruncateTail` with one line tolerance)
   - `TruncateTail { max_tail_lines }`
 - `PersistedMetadataNode::new_from_env` reads `GANGLION_PERSISTED_REPLAY_PROFILE` when available.
+- `PersistedMetadataNode::new_with_replay_profile_str` accepts an optional raw profile string override and returns the resolved
+  startup profile resolution (explicit override, environment, or default) alongside the node:
+  - helper return type: `PersistedMetadataReplayProfileResolution`.
+  - resolution source: `Explicit`, `Environment`, or `Default`.
+- `PersistedMetadataReplayProfileSource`
+  - Tracks where the profile decision came from (`Explicit` / `Environment` / `Default`).
+- `PersistedMetadataReplayProfileResolution`
+  - Structured output for startup-profile decisions with both `profile` and `source`.
 - `PersistedMetadataNode::startup_replay_profile` and `startup_replay_policy` expose the resolved startup choice.
 - `PersistedMetadataReplayProfile` can also be parsed from strings such as:
   - `strict`
