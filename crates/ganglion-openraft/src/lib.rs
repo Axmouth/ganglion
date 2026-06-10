@@ -1145,6 +1145,18 @@ mod tests {
             OpenraftAdapterError::Storage(_)
         ));
 
+        let strict_override_reject = PersistedMetadataNode::new_with_replay_profile_str(
+            path.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            Some("strict"),
+        )
+        .expect_err("explicit strict should fail with malformed tail beyond zero tolerance");
+        assert!(matches!(
+            strict_override_reject,
+            OpenraftAdapterError::Storage(_)
+        ));
+
         let (explicit_node, explicit_resolution) =
             PersistedMetadataNode::new_with_replay_profile_str(
                 path.clone(),
@@ -1196,6 +1208,138 @@ mod tests {
         assert_eq!(
             default_ok_node.startup_replay_profile(),
             PersistedMetadataReplayProfile::Default
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
+    }
+
+    #[test]
+    fn persisted_node_startup_profile_matrix_for_strict_default_and_env_permutations() {
+        let _env_lock = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let path_one_malformed = unique_temp_path("startup-profile-matrix-one-malformed");
+        prepare_persisted_log_with_corruption_tail(&path_one_malformed, 2, vec![0, 1, 2])
+            .expect("startup-log fixture should include one malformed entry");
+
+        let env_strict_fails = PersistedMetadataNode::new_with_replay_profile_str(
+            path_one_malformed.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            None,
+        )
+        .expect_err("env strict should reject one malformed tail line");
+        assert!(matches!(env_strict_fails, OpenraftAdapterError::Storage(_)));
+
+        let (explicit_default_node, explicit_default_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                path_one_malformed.clone(),
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("default"),
+            )
+            .expect("explicit default should recover on one malformed tail entry");
+        assert_eq!(
+            explicit_default_resolution.source,
+            PersistedMetadataReplayProfileSource::Explicit
+        );
+        assert_eq!(
+            explicit_default_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Default
+        );
+
+        let explicit_strict_fails = PersistedMetadataNode::new_with_replay_profile_str(
+            path_one_malformed.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            Some("strict"),
+        )
+        .expect_err("explicit strict should reject one malformed tail line");
+        assert!(matches!(
+            explicit_strict_fails,
+            OpenraftAdapterError::Storage(_)
+        ));
+
+        let (explicit_tail_node, explicit_tail_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                path_one_malformed,
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("tail:2"),
+            )
+            .expect("explicit tail profile should recover one malformed tail entry");
+        assert_eq!(
+            explicit_tail_resolution,
+            PersistedMetadataReplayProfileResolution {
+                profile: PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 },
+                source: PersistedMetadataReplayProfileSource::Explicit
+            }
+        );
+        assert_eq!(
+            explicit_tail_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 }
+        );
+
+        let path_two_malformed = unique_temp_path("startup-profile-matrix-two-malformed");
+        prepare_persisted_log_with_corruption_tail(&path_two_malformed, 2, vec![0, 1, 0])
+            .expect("startup-log fixture should include two malformed entries");
+
+        let strict_env_fails = PersistedMetadataNode::new_with_replay_profile_str(
+            path_two_malformed.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            None,
+        )
+        .expect_err("env strict should reject two malformed tail lines");
+        assert!(matches!(strict_env_fails, OpenraftAdapterError::Storage(_)));
+
+        let default_fails = PersistedMetadataNode::new_with_replay_profile_str(
+            path_two_malformed.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            Some("default"),
+        )
+        .expect_err("explicit default should reject two malformed tail lines");
+        assert!(matches!(default_fails, OpenraftAdapterError::Storage(_)));
+
+        let (_explicit_tail_two_node, explicit_tail_two_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                path_two_malformed,
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("tail:2"),
+            )
+            .expect("explicit tail:2 should recover two malformed tail entries");
+        assert_eq!(
+            explicit_tail_two_resolution,
+            PersistedMetadataReplayProfileResolution {
+                profile: PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 },
+                source: PersistedMetadataReplayProfileSource::Explicit
+            }
+        );
+
+        let clean_path = unique_temp_path("startup-profile-matrix-clean-for-env");
+        prepare_persisted_log_with_corruption_tail(&clean_path, 2, vec![])
+            .expect("startup-log fixture should be clean");
+        let (env_node, env_resolution) = PersistedMetadataNode::new_with_replay_profile_str(
+            clean_path,
+            "node-a",
+            CoordinationSnapshot::default(),
+            None,
+        )
+        .expect("explicit env strict should pass on clean startup log");
+        assert_eq!(
+            env_resolution.profile,
+            PersistedMetadataReplayProfile::Strict
+        );
+        assert_eq!(
+            env_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
         );
 
         match original {

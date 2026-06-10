@@ -541,3 +541,37 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add planner strategy registry with parameterized policies.
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v18 execution pass completed
+
+- `ganglion-openraft`:
+  - Added explicit startup-policy matrix coverage under malformed-tail recovery:
+    - explicit strict/path, explicit default/path, explicit bounded-tail/path,
+    - env strict/path against one and two malformed tail entries,
+    - env strict success case on clean recovery logs.
+  - Added explicit matrix assertions for resolved profile source:
+    - explicit overrides report `Explicit`,
+    - env fallback remains `Environment`,
+    - successful bounded-tail recovery preserves expected startup profile.
+- `tests/jepsen`:
+  - Added `tests/jepsen/scenarios/05-startup-policy-matrix.sh`:
+    - runs the startup-policy matrix unit checks as a dedicated failure-matrix artifact scenario.
+  - Updated scenario inventory documentation to include the new matrix scenario.
+
+- Validation:
+  - `./scripts/validate.sh` now runs this matrix indirectly via scenario ordering when Jepsen fallback is used.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep constructor startup-policy matrix explicit for remaining path permutations and edge cases.
+  2. Add bounded-tail malformed-tail boundary cases to property/fuzz matrix coverage.
+  3. Begin Keratin adapter scaffolding while preserving constructor precedence semantics.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same contracts.
+  2. Expose richer committed-snapshot publication channels for controllers and watchers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Offer stable backend adapters for Keratin and additional WAL/event log stores.

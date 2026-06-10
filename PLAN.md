@@ -747,3 +747,44 @@ Make persisted startup recovery policy configuration explicit without removing b
 1. Add planner strategy registry and parameterized strategy options.
 2. Add snapshot compaction/migration and durable retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## Plan Snapshot v18
+
+### Goal
+
+Make startup-profile constructor precedence explicit across strict/default/env paths and make that matrix visible in startup-policy artifacts.
+
+### Completed in this snapshot
+
+- Added startup-policy permutation coverage:
+  - explicit strict, explicit default, explicit bounded-tail, and environment-sourced constructors under mixed malformed-tail conditions.
+  - confirmed explicit default behaves independently of strict env while bounded-tail overrides still recover where budget allows.
+  - confirmed strict env paths continue to reject malformed startup tails.
+- Added `tests/jepsen/scenarios/05-startup-policy-matrix.sh`:
+  - dedicated startup-policy matrix scenario that runs focused Rust checks when Jepsen is unavailable.
+  - includes expected invariants and failure/success matrix points to keep behavior visible in jepsen artifact logs.
+- Updated scenario inventory in `tests/jepsen/README.md` for the new matrix scenario.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational confidence
+
+1. Keep constructor startup-policy matrix explicit for any remaining env/default/explicit permutations.
+2. Add persisted startup-policy matrix cases into property-style coverage for malformed-tail boundary transitions.
+3. Start minimal Keratin-backed adapter scaffold once constructor/fuzz invariants are stable.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Expose committed-snapshot publication stream with richer event sinks.
+3. Expand partition/failover sequence coverage with scripted fallback executions.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized policy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
