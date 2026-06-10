@@ -575,3 +575,41 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add planner strategy registry with parameterized policies.
   2. Add durable retention and compaction tooling for replay logs.
   3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## v19 execution pass completed
+
+- `ganglion-storage`:
+  - Added optional Keratin-backed metadata log adapter behind feature `keratin` in `KeratinMetadataLog`:
+    - owns a `keratin-log::Keratin` log instance,
+    - writes serialized `PersistedMetadataLogEntry` payloads,
+    - replays entries through a compatibility parser and validates contiguous log indexes.
+  - Added Keratin-specific tests (behind `keratin` feature):
+    - `keratin_metadata_log_roundtrips_append_and_replay`,
+    - `keratin_metadata_log_clear_and_truncate_from`.
+  - Fixed index replay handling after truncation by validating against prior entry (rather than hard-coding start index 1) so suffix-preserving truncation replays correctly.
+  - Eliminated temporary debug traces inserted during debugging so the module is clean for normal runs.
+
+- `ganglion-openraft`:
+  - Added `PersistedMetadataNode::new_with_log(...)` and `new_with_log_and_profile(...)` to construct persisted nodes from an injected `MetadataLog` implementation.
+  - Added regression coverage for injected backends:
+    - `persisted_node_new_with_log_uses_injected_backend`.
+
+- Validation:
+  - `cargo test -p ganglion-storage --quiet`
+  - `cargo test -p ganglion-storage --features keratin --quiet -- --exact tests::keratin_metadata_log_clear_and_truncate_from --test-threads=1`
+  - `cargo test -p ganglion-storage --features keratin --quiet -- --exact tests::keratin_metadata_log_roundtrips_append_and_replay --test-threads=1`
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep the core persistence API stable while adding any remaining Keratin storage behavior parity with file log.
+  2. Add deterministic failure-path tests for malformed Keratin tails under mixed valid/truncated input.
+  3. Add a small one-shot validation phase that exercises all storage backends available in CI/local smoke.
+- Medium-term:
+  1. Add committed-snapshot publication stream and durability telemetry for storage operations.
+  2. Expand fuzz/proptest coverage for storage replay policy and truncation behavior.
+  3. Replace placeholder consensus transport path with the real openraft transport while preserving current contracts.
+- Long-term:
+  1. Offer additional backend adapters behind `MetadataLog` (`keratin`, other append-log providers).
+  2. Add snapshot retention and compaction tooling for durable logs.
+  3. Move planner strategy registry and strategy-specific defaults into a reusable catalog.

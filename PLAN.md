@@ -788,3 +788,53 @@ Make startup-profile constructor precedence explicit across strict/default/env p
 1. Add planner strategy registry and parameterized policy options.
 2. Add snapshot compaction/migration and durable retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## Plan Snapshot v19
+
+### Goal
+
+Stabilize Keratin persistence integration enough to be usable by the existing persisted adapter path, then broaden coverage for storage parity and transport/telemetry follow-up.
+
+### Completed in this snapshot
+
+- `ganglion-storage`:
+  - Added optional `KeratinMetadataLog` behind `keratin` feature:
+    - wraps `keratin-log` as a durable metadata log backend,
+    - reuses the same `MetadataLog` contract as file/in-memory backends,
+    - supports configurable replay policy (`Strict`, `TruncateTail`).
+  - Added Keratin append/replay tests under feature-gated unit tests:
+    - `keratin_metadata_log_roundtrips_append_and_replay`,
+    - `keratin_metadata_log_clear_and_truncate_from`.
+  - Fixed suffix-preserving truncation replay behavior by validating sequence continuity from the last known entry index (not absolute start index).
+  - Removed temporary debug scaffolding used during hang investigation.
+
+- `ganglion-openraft`:
+  - Added constructor paths that accept an injected `MetadataLog` backend:
+    - `PersistedMetadataNode::new_with_log`
+    - `PersistedMetadataNode::new_with_log_and_profile`
+  - Added regression test for injected-log construction:
+    - `persisted_node_new_with_log_uses_injected_backend`.
+
+### Short-Term Roadmap
+
+#### Resolution target: persistence parity across backends
+
+1. Keep Keratin and file backends aligned on replay/tail-error behavior, including bounded-tail semantics under malformed inputs.
+2. Add a dedicated parity test set that runs both backends through equivalent replay-cases.
+3. Add validation reporting for backend selection and replay-policy path used at startup.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-ready metadata plane
+
+1. Replace current placeholder consensus transport path with true openraft transport while preserving `MetadataConsensus` contracts.
+2. Add committed-snapshot publishing and health telemetry around durability operations.
+3. Add scripted failover/rejoin scenarios that exercise persisted backends end-to-end.
+
+### Long-Term Roadmap
+
+#### Resolution target: pluggable persistence strategy
+
+1. Add additional `MetadataLog` adapters for non-file/WAL providers under one interface.
+2. Add compaction, truncation policy hooks, and retention envelopes suitable for production metadata planes.
+3. Expand strategy registries and strategy-specific options for planner defaults and rollout behavior.

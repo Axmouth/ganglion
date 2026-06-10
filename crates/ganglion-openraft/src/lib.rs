@@ -516,6 +516,32 @@ pub struct PersistedMetadataNode {
 }
 
 impl PersistedMetadataNode {
+    pub fn new_with_log(
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        log: Box<dyn MetadataLog>,
+    ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_log_and_profile(
+            node_id,
+            initial_snapshot,
+            log,
+            PersistedMetadataReplayProfile::Default,
+        )
+    }
+
+    fn new_with_log_and_profile(
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        log: Box<dyn MetadataLog>,
+        startup_replay_profile: PersistedMetadataReplayProfile,
+    ) -> Result<Self, OpenraftAdapterError> {
+        let inner = MetadataNode::new(node_id, initial_snapshot, log)?;
+        Ok(Self {
+            inner,
+            startup_replay_profile,
+        })
+    }
+
     pub fn new<P: Into<std::path::PathBuf>>(
         path: P,
         node_id: impl Into<String>,
@@ -622,11 +648,7 @@ impl PersistedMetadataNode {
                 Box::new(FileMetadataLog::with_replay_policy(path, replay_policy))
             }
         };
-        let inner = MetadataNode::new(node_id, initial_snapshot, log)?;
-        Ok(Self {
-            inner,
-            startup_replay_profile: replay_profile,
-        })
+        Self::new_with_log_and_profile(node_id, initial_snapshot, log, replay_profile)
     }
 
     pub fn startup_replay_profile(&self) -> PersistedMetadataReplayProfile {
@@ -1563,6 +1585,32 @@ mod tests {
 
         assert_eq!(published.generation, 2);
         assert_eq!(coordination.snapshot(), published);
+    }
+
+    #[test]
+    fn persisted_node_new_with_log_uses_injected_backend() {
+        let log = Box::new(InMemoryMetadataLog::new());
+        let node =
+            PersistedMetadataNode::new_with_log("node-a", CoordinationSnapshot::default(), log)
+                .expect("injected log constructor should succeed");
+
+        assert_eq!(
+            node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Default
+        );
+        node.set_leader("node-a");
+        node.apply_snapshot(
+            "node-a",
+            CoordinationSnapshot {
+                generation: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .expect("apply should pass via injected log");
+
+        assert_eq!(node.log_len(), 1);
+        assert_eq!(node.snapshot().generation, 1);
     }
 
     #[test]

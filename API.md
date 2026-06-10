@@ -115,10 +115,17 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Supports configurable replay policy through `FileMetadataReplayPolicy`:
     - `Strict` for hard-fail validation
     - `TruncateTail { max_tail_lines }` to recover from bounded trailing corruption.
+- `KeratinMetadataLog` (feature `keratin`)
+  - Durable metadata backend powered by `keratin-log`.
+  - Supports the same append/read/clear/truncate contract as the file log with replay-policy behavior.
+  - Intended for append-only segment style durability where restart/replay is handled by the underlying keratin segment system.
 - `MetadataLogEntry`
   - Term/index/snapshot records stored by durable implementations.
 - `FileMetadataReplayPolicy`
   - Storage replay policy for file logs, selected at constructor time.
+- `MetadataLog` constructor pathways for persisted nodes
+  - `PersistedMetadataNode::new_with_log(...)` and `PersistedMetadataNode::new_with_log_and_profile(...)`
+  - Support injecting any `MetadataLog` implementation for startup/constructor-path tests and backend parity runs.
 - `PersistedMetadataNode::new_with_replay_policy`
   - File-backed node constructor that allows bounded-tail recoverability choices at startup.
 
