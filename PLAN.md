@@ -935,3 +935,50 @@ Finalize parity coverage and make storage validation repeatable for both file an
 1. Add additional `MetadataLog` adapters behind a stable catalog interface.
 2. Add retention and compaction tooling for metadata durability.
 3. Move planner strategy registry into reusable operator configuration and policy catalogs.
+
+## Plan v22
+
+### Goal
+
+Run persistence parity and startup-boundary checks as an explicit Jepsen-style scenario artifact.
+
+### Completed in this snapshot
+
+- `tests/jepsen`:
+  - Added `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+    - runs focused, local persistence invariants for both storage backends when Jepsen/Clojure is unavailable.
+    - covers file and Keratin tail-boundary behavior via shared regression-oriented tests.
+    - covers persisted startup-path replay checks in `ganglion-openraft`.
+  - Updated `tests/jepsen/README.md` scenario inventory to include the new parity scenario.
+
+- `JEPSEN_PLAN.md`:
+  - Added Scenario 6 for persistence backend parity/fault checks.
+  - Recorded that fallback execution now includes file+Keratin parity + startup behavior checks.
+
+- `crates/ganglion-openraft` / `ganglion-storage` test coverage:
+  - Kept validation-facing persistence checks discoverable through one-jepsen scenario command path.
+  - Scenario reuses existing test surface for deterministic parity behavior and avoids new runtime dependencies.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational persistence confidence
+
+1. Keep the one-shot persistence scenario in the default Jepsen orchestration run ordering.
+2. Start adding structured scenario-specific artifacts for failure matrices (beyond log lines in `.log` files).
+3. Add explicit assertions for mixed-tail and backoff behavior at startup across both backends in fallback checks.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport/runtime readiness
+
+1. Replace placeholder consensus transport with real openraft transport while preserving current interfaces.
+2. Add durability telemetry around append/clear/truncate and startup recovery paths.
+3. Expand persisted failover/rejoin scenarios to explicitly sequence restarts against backend parity checks.
+
+### Long-Term Roadmap
+
+#### Resolution target: operator-facing persistence posture
+
+1. Expand `MetadataLog` adapter catalog with policy and telemetry hooks.
+2. Add retention/compaction tooling for metadata durability and faster recovery.
+3. Move planner strategy registry and persistence behavior profiles into reusable config registries.

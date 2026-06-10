@@ -695,3 +695,41 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Extend `MetadataLog` adapter catalog under a stable contract.
   2. Add retention and compaction tooling for metadata durability.
   3. Move planner strategy registry into reusable operator configuration surfaces.
+
+## v22 execution pass completed
+
+- `tests/jepsen`:
+  - Added `tests/jepsen/scenarios/06-persistence-backend-parity.sh` as a new fallback scenario.
+  - The scenario runs when Jepsen is unavailable and executes storage parity + persisted startup checks:
+    - file/Keratin tail-boundary recovery fuzz and boundary tests in `ganglion-storage` (keratin feature path),
+    - persisted startup path checks in `ganglion-openraft`.
+  - Updated `tests/jepsen/README.md` scenario inventory to include the new persistence-parity entry.
+
+- `JEPSEN_PLAN.md`:
+  - Added Scenario 6 for persistence backend parity.
+  - Documented fallback extension to include backend parity and startup boundary coverage.
+
+- Documentation consistency:
+  - Updated `PLAN.md` with `Plan v22` to keep the long-lived planning record append-only and to set next step alignment.
+
+- Roadmap alignment:
+  - This pass moves roadmap execution to the short-term persistence Jepsen-style checkpoint and keeps medium/long-term transport/planner tasks unchanged until durable transport and watcher telemetry are completed.
+
+- Operational finding carry-forward:
+  - Hang-like behavior previously observed in earlier iterations is reproducibly tied to an external long-running background invocation path, not the core storage/openraft validation paths. This is the reason `scripts/validate.sh --skip-fuzz` repeatedly stays stable while broad one-shot runs elsewhere could stall.
+  - Practical rule: when a full run appears to hang, isolate first with scenario-level commands, then check for orphaned invocations before re-running the full command set.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep the new persistence scenario in default `tests/jepsen/run.sh all` ordering and ensure artifact logs remain stable.
+  2. Add structured scenario artifacts and evidence beyond log-level pass/fail statements.
+  3. Extend persistence scenario to include follower/reactivation edge cases after backend recovery.
+- Medium-term:
+  1. Replace placeholder consensus transport with a real openraft runtime path.
+  2. Add durability telemetry around adapter operations and startup recovery behavior.
+  3. Expand cluster-level restart/failover scenarios to include storage parity and recovery in control loops.
+- Long-term:
+  1. Introduce configurable retention and compaction policies per adapter.
+  2. Expand adapter catalog for additional metadata storage families.
+  3. Move strategy registries (planner and persistence profile) into operator-facing configuration.

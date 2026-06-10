@@ -54,6 +54,13 @@ It is a roadmap artifact, not a time-based log.
   - no phantom publication on rejected proposals,
   - all watchers converge to same committed snapshot.
 
+### 6) Persistence backend parity checks
+- Exercise storage-tail recovery invariants for file and Keratin metadata backends.
+- Assertions:
+  - malformed tails recover only within configured bounded-tail budgets,
+  - non-sequential boundaries are rejected when strict and truncated only when allowed,
+  - startup persistence checks remain deterministic after mixed/recoverable tails.
+
 ## Test artifact plan
 
 - `tests/jepsen/openraft-plan-smoke.md`: scenario-by-scenario command list for a future harness.
@@ -67,6 +74,7 @@ It is a roadmap artifact, not a time-based log.
 
 - Scenario scripts in `tests/jepsen/scenarios/` now run focused `ganglion-openraft` Rust checks when Jepsen/Clojure is unavailable.
 - This keeps invariant coverage active in non-Clojure environments while keeping the future Jepsen hook in place.
+- The fallback set now includes `06-persistence-backend-parity.sh` to validate storage parity and startup tails in one persistence scenario.
 
 ## Exit checks
 

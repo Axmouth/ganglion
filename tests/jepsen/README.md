@@ -50,6 +50,7 @@ If Clojure/Jepsen is not available in the environment, scenario scripts will emi
 - `03-crash-recovery.sh`
 - `04-startup-entrypoint-smoke.sh`
 - `05-startup-policy-matrix.sh`
+- `06-persistence-backend-parity.sh`
 
 ## Current status
 
