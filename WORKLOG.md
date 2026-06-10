@@ -653,3 +653,45 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add snapshot retention, compaction, and storage maintenance paths for metadata durability.
   2. Grow adapter catalog for non-WAL/WAL-like stores with feature-gated constructors.
   3. Move planner strategy registry into a reusable policy catalog with operator tuning knobs.
+
+## v21 execution pass completed
+
+- `ganglion-storage`:
+  - Added backend-aware storage fuzzing for bounded-tail boundaries:
+    - `fuzz_file_metadata_log_tail_boundary_recovery` for file logs.
+    - `fuzz_keratin_metadata_log_tail_boundary_recovery` for Keratin logs.
+  - Added deterministic helper strategies in `ganglion-storage` tests:
+    - synthetic marker tails,
+    - recovery-cost calculation used to assert truncation boundary behavior.
+  - Added dedicated parity regression fixture directory:
+    - `crates/ganglion-storage/proptest-regressions/`.
+  - Extended `.gitignore` to keep storage regression fixtures in-repo while preserving normal ignores.
+
+- Validation scaffolding:
+  - Added `scripts/storage-parity.sh` for one-shot storage backend parity runs.
+  - Added `storage_parity` phase to `scripts/validate.sh` with summary details:
+    - backend list (`["file","keratin"]`),
+    - replay profile metadata tied to startup profile resolution.
+  - Extended `scripts/proptest.sh` crate list to include `ganglion-storage`.
+
+- Validation runs:
+  - `bash scripts/storage-parity.sh` passed (keratin + startup checks).
+  - `bash scripts/validate.sh --skip-jepsen --skip-fuzz` passed with storage parity and startup smoke included.
+
+- Operational finding:
+  - The hang signal seen earlier appears in a separate long-running background invocation path, not in direct storage/openraft validation paths. Core test logic continues to run without hangs.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep the one-shot validation path as the default local gate for storage parity, startup smoke, and fuzz.
+  2. Keep backend provenance and replay-policy metadata explicit in validation artifacts.
+  3. Add Jepsen-style persistence restart/failover scenarios that execute file and keratin paths side-by-side.
+- Medium-term:
+  1. Replace placeholder consensus transport with real openraft runtime path while preserving current interfaces.
+  2. Add durability telemetry around append/clear/truncate operations.
+  3. Expose durable snapshot publication and health channels for controllers.
+- Long-term:
+  1. Extend `MetadataLog` adapter catalog under a stable contract.
+  2. Add retention and compaction tooling for metadata durability.
+  3. Move planner strategy registry into reusable operator configuration surfaces.

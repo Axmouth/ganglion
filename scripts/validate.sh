@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JEPSEN_ARTIFACT_DIR="${ROOT_DIR}/tests/jepsen/artifacts/validate-run"
 RUN_FMT=true
 RUN_TESTS=true
+RUN_STORAGE_PARITY=true
 RUN_STARTUP_SMOKE=true
 RUN_PROPT=true
 RUN_JEPSEN=true
@@ -12,6 +13,7 @@ RUN_JEPSEN=true
 PERSISTED_REPLAY_PROFILE_ENV="GANGLION_PERSISTED_REPLAY_PROFILE"
 SUMMARY_FMT="skipped"
 SUMMARY_TESTS="skipped"
+SUMMARY_STORAGE_PARITY="skipped"
 SUMMARY_STARTUP_SMOKE="skipped"
 SUMMARY_PROPT="skipped"
 SUMMARY_JEPSEN="skipped"
@@ -24,6 +26,7 @@ Usage:
 Options:
   --skip-fmt              skip cargo fmt --all --check
   --skip-tests            skip cargo test --workspace --quiet
+  --skip-storage-parity   skip storage parity + startup constructor smoke
   --skip-startup-smoke    skip persisted startup-entrypoint smoke check
   --skip-fuzz             skip scripts/proptest.sh run
   --skip-jepsen           skip tests/jepsen/run.sh all
@@ -49,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-tests)
       RUN_TESTS=false
+      shift
+      ;;
+    --skip-storage-parity)
+      RUN_STORAGE_PARITY=false
       shift
       ;;
     --skip-startup-smoke)
@@ -93,6 +100,12 @@ run_tests() {
   echo "validate: cargo test --workspace --quiet"
   cargo test --workspace --quiet
   SUMMARY_TESTS="pass"
+}
+
+run_storage_parity() {
+  echo "validate: bash scripts/storage-parity.sh"
+  bash "$ROOT_DIR/scripts/storage-parity.sh"
+  SUMMARY_STORAGE_PARITY="pass"
 }
 
 run_startup_smoke() {
@@ -142,9 +155,20 @@ write_summary() {
       "requested": $RUN_FMT,
       "result": "$SUMMARY_FMT"
     },
-    "tests": {
+  "tests": {
       "requested": $RUN_TESTS,
       "result": "$SUMMARY_TESTS"
+    },
+    "storage_parity": {
+      "requested": $RUN_STORAGE_PARITY,
+      "result": "$SUMMARY_STORAGE_PARITY",
+      "backends": ["file","keratin"],
+      "startup_replay_profile": {
+        "env_var": "$PERSISTED_REPLAY_PROFILE_ENV",
+        "value": "$replay_profile_raw",
+        "effective": "$replay_profile_effective",
+        "source": "$replay_profile_source"
+      }
     },
     "startup_smoke": {
       "requested": $RUN_STARTUP_SMOKE,
@@ -170,6 +194,10 @@ fi
 
 if [[ "$RUN_TESTS" == true ]]; then
   run_tests
+fi
+
+if [[ "$RUN_STORAGE_PARITY" == true ]]; then
+  run_storage_parity
 fi
 
 if [[ "$RUN_STARTUP_SMOKE" == true ]]; then

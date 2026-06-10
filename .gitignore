@@ -26,8 +26,10 @@ coverage/
 **/proptest-regressions/
 !crates/ganglion-core/proptest-regressions/
 !crates/ganglion-openraft/proptest-regressions/
+!crates/ganglion-storage/proptest-regressions/
 !crates/ganglion-core/proptest-regressions/**
 !crates/ganglion-openraft/proptest-regressions/**
+!crates/ganglion-storage/proptest-regressions/**
 
 # Tooling / IDE
 .idea/

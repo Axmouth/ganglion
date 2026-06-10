@@ -686,6 +686,8 @@ impl MetadataLog for KeratinMetadataLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)]
+    use proptest::prelude::*;
     use std::fs::File;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -731,6 +733,78 @@ mod tests {
         let mut file = File::options().create(true).append(true).open(path)?;
         let payload = serde_json::to_string(&entry)?;
         writeln!(file, "{payload}")?;
+        Ok(())
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum FileTailMarker {
+        MalformedPayload,
+        NonSequentialPayload,
+        SkippedLine,
+    }
+
+    impl FileTailMarker {
+        fn is_bad_record(&self) -> bool {
+            !matches!(self, Self::SkippedLine)
+        }
+
+        fn as_file_tail(&self, path: &std::path::Path, bad_index: u64) -> std::io::Result<()> {
+            let mut file = File::options().create(true).append(true).open(path)?;
+
+            match self {
+                Self::MalformedPayload => {
+                    file.write_all(b"{not-json}\n")?;
+                }
+                Self::NonSequentialPayload => {
+                    let entry = PersistedMetadataLogEntry {
+                        term: 1,
+                        index: bad_index,
+                        snapshot: encode_snapshot(&CoordinationSnapshot {
+                            generation: bad_index,
+                            ..Default::default()
+                        })
+                        .expect("encoded snapshot should serialize"),
+                    };
+                    let payload = serde_json::to_string(&entry)?;
+                    writeln!(file, "{payload}")?;
+                }
+                Self::SkippedLine => {
+                    writeln!(file, "#")?;
+                }
+            }
+
+            Ok(())
+        }
+    }
+
+    fn file_tail_marker_strategy() -> impl Strategy<Value = FileTailMarker> {
+        prop::sample::select(vec![
+            FileTailMarker::MalformedPayload,
+            FileTailMarker::NonSequentialPayload,
+            FileTailMarker::SkippedLine,
+        ])
+    }
+
+    fn tail_recovery_cost(markers: &[FileTailMarker]) -> Option<usize> {
+        let first_bad = markers.iter().position(|marker| marker.is_bad_record())?;
+        let remaining_bad = markers
+            .iter()
+            .skip(first_bad + 1)
+            .filter(|marker| marker.is_bad_record());
+        let skipped_tail = remaining_bad.count();
+        Some(skipped_tail + 1)
+    }
+
+    fn append_file_tail_markers(
+        path: &std::path::Path,
+        base_entries: u8,
+        markers: &[FileTailMarker],
+    ) -> std::io::Result<()> {
+        for (idx, marker) in markers.iter().enumerate() {
+            let bad_index = base_entries as u64 + idx as u64 + 2;
+            marker.as_file_tail(path, bad_index)?;
+        }
+
         Ok(())
     }
 
@@ -968,6 +1042,212 @@ mod tests {
             .entries()
             .expect_err("too much trailing corruption should fail");
         assert!(matches!(err, MetadataLogError::Parse(_)));
+    }
+
+    #[test]
+    fn file_metadata_log_tail_recovery_cost_examples() {
+        assert_eq!(tail_recovery_cost(&[]), None);
+        assert_eq!(
+            tail_recovery_cost(&[FileTailMarker::MalformedPayload]),
+            Some(1)
+        );
+        assert_eq!(
+            tail_recovery_cost(&[
+                FileTailMarker::SkippedLine,
+                FileTailMarker::MalformedPayload,
+                FileTailMarker::SkippedLine
+            ]),
+            Some(1)
+        );
+        assert_eq!(
+            tail_recovery_cost(&[
+                FileTailMarker::SkippedLine,
+                FileTailMarker::MalformedPayload,
+                FileTailMarker::NonSequentialPayload,
+                FileTailMarker::SkippedLine
+            ]),
+            Some(2)
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn fuzz_file_metadata_log_tail_boundary_recovery(
+            base_entries in 1u8..12,
+            max_tail in 0u8..6,
+            tail_markers in prop::collection::vec(file_tail_marker_strategy(), 0..8),
+        ) {
+            let path = unique_temp_path("fuzz-file-tail-boundary");
+
+            for index in 0..base_entries {
+                write_raw_entry(
+                    &path,
+                    PersistedMetadataLogEntry {
+                        term: 1,
+                        index: u64::from(index + 1),
+                        snapshot: encode_snapshot(&CoordinationSnapshot {
+                            generation: u64::from(index + 1),
+                            ..Default::default()
+                        })
+                        .expect("encode snapshot"),
+                    },
+                )
+                .expect("write base entry");
+            }
+
+            append_file_tail_markers(&path, base_entries, &tail_markers)
+                .expect("append tail markers");
+
+            let log = FileMetadataLog::with_replay_policy(
+                path,
+                FileMetadataReplayPolicy::TruncateTail {
+                    max_tail_lines: usize::from(max_tail),
+                },
+            );
+            let recovery_cost = tail_recovery_cost(&tail_markers);
+            let max_tail = usize::from(max_tail);
+
+            match recovery_cost {
+                Some(recovery_cost) if recovery_cost <= max_tail => {
+                    let entries = log.entries().expect("replay should succeed in bounded-tail mode");
+                    assert_eq!(entries.len(), usize::from(base_entries));
+                    if base_entries > 0 {
+                        assert_eq!(entries.last().expect("at least one entry").index, u64::from(base_entries));
+                    } else {
+                        assert!(entries.is_empty());
+                    }
+                }
+                Some(_) => {
+                    let err = log.entries().expect_err("tail beyond budget should fail");
+                    assert!(matches!(err, MetadataLogError::Parse(_)));
+                }
+                None => {
+                    let entries = log.entries().expect("clean tail should replay successfully");
+                    assert_eq!(entries.len(), usize::from(base_entries));
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "keratin")]
+    #[derive(Debug, Clone, Copy)]
+    enum KeratinTailMarker {
+        MalformedPayload,
+        NonSequentialPayload,
+    }
+
+    #[cfg(feature = "keratin")]
+    fn keratin_tail_marker_strategy() -> impl Strategy<Value = KeratinTailMarker> {
+        prop::sample::select(vec![
+            KeratinTailMarker::MalformedPayload,
+            KeratinTailMarker::NonSequentialPayload,
+        ])
+    }
+
+    #[cfg(feature = "keratin")]
+    fn append_keratin_tail_markers(
+        log: &KeratinMetadataLog,
+        base_entries: u8,
+        markers: &[KeratinTailMarker],
+    ) -> Result<(), MetadataLogError> {
+        for (idx, marker) in markers.iter().enumerate() {
+            let bad_index = base_entries as u64 + idx as u64 + 2;
+            match marker {
+                KeratinTailMarker::MalformedPayload => {
+                    keratin_append_raw_payload(log, b"{bad}\n".to_vec())?
+                }
+                KeratinTailMarker::NonSequentialPayload => keratin_append_persisted_entry(
+                    log,
+                    1,
+                    bad_index,
+                    CoordinationSnapshot {
+                        generation: bad_index,
+                        ..Default::default()
+                    },
+                )?,
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "keratin")]
+    fn keratin_tail_recovery_cost(markers: &[KeratinTailMarker]) -> Option<usize> {
+        if markers.is_empty() {
+            return None;
+        }
+
+        Some(markers.len())
+    }
+
+    #[cfg(feature = "keratin")]
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn fuzz_keratin_metadata_log_tail_boundary_recovery(
+            base_entries in 1u8..12,
+            max_tail in 0u8..6,
+            tail_markers in prop::collection::vec(keratin_tail_marker_strategy(), 0..8),
+        ) {
+            let root = unique_temp_dir_path("keratin-tail-boundary");
+
+            let max_tail = usize::from(max_tail);
+            {
+                let log = KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+                    .expect("keratin strict log should open");
+                for index in 0..base_entries {
+                    log.append_entry(
+                        1,
+                        CoordinationSnapshot {
+                            generation: u64::from(index + 1),
+                            ..Default::default()
+                        },
+                    )
+                    .expect("seed baseline entries");
+                }
+
+                append_keratin_tail_markers(&log, base_entries, &tail_markers)
+                    .expect("append fuzz tail markers");
+            }
+
+            let log = KeratinMetadataLog::with_replay_policy(
+                &root,
+                FileMetadataReplayPolicy::TruncateTail {
+                    max_tail_lines: max_tail,
+                },
+            )
+            .expect("keratin reopen should succeed");
+
+            match keratin_tail_recovery_cost(&tail_markers) {
+                Some(recovery_cost) if recovery_cost <= max_tail => {
+                    let entries = log.entries().expect("replay should succeed in bounded-tail mode");
+                    assert_eq!(entries.len(), usize::from(base_entries));
+                    if base_entries > 0 {
+                        assert_eq!(
+                            entries.last().expect("last entry should exist").snapshot.generation,
+                            u64::from(base_entries)
+                        );
+                    }
+                }
+                Some(_) => {
+                    let err = log
+                        .entries()
+                        .expect_err("tail beyond budget should fail");
+                    assert!(matches!(err, MetadataLogError::Parse(_)));
+                }
+                None => {
+                    let entries = log.entries().expect("clean tail should replay successfully");
+                    assert_eq!(entries.len(), usize::from(base_entries));
+                    if base_entries > 0 {
+                        assert_eq!(
+                            entries.last().expect("last entry should exist").snapshot.generation,
+                            u64::from(base_entries)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "keratin")]

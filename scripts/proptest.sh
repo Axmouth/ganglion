@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CRATES=(ganglion-core ganglion-openraft)
+CRATES=(ganglion-core ganglion-openraft ganglion-storage)
 
 usage() {
   cat <<'EOF'

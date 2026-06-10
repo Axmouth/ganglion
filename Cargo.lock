@@ -265,6 +265,7 @@ dependencies = [
  "futures",
  "ganglion-core",
  "keratin-log",
+ "proptest",
  "serde",
  "serde_json",
 ]

@@ -877,3 +877,61 @@ Confirm storage parity and validation ergonomics for Keratin backends before tra
 1. Add retention and compaction utilities for metadata log durability.
 2. Expand `MetadataLog` adapter catalog and migration tooling.
 3. Move planner strategy policy registry into reusable operator-facing configuration surfaces.
+
+## Plan Snapshot v21
+
+### Goal
+
+Finalize parity coverage and make storage validation repeatable for both file and keratin durability backends.
+
+### Completed in this snapshot
+
+- `ganglion-storage`:
+  - Added backend-tail property coverage for bounded recovery boundaries:
+    - `fuzz_file_metadata_log_tail_boundary_recovery` with generated marker tails.
+    - `fuzz_keratin_metadata_log_tail_boundary_recovery` with generated malformed/non-sequential tails.
+  - Added storage test fixture retention for fuzz regressions at `crates/ganglion-storage/proptest-regressions/`.
+  - Extended `.gitignore` to keep regression artifacts committed by convention when useful.
+
+- `ganglion-openraft`:
+  - Kept persisted startup and backend-injected constructor behavior stable under parity additions.
+
+- Tooling:
+  - Added `scripts/storage-parity.sh` to run one-shot storage backend checks:
+    - keratin-backed persisted recovery boundary tests
+    - persisted startup constructor checks
+  - Added `storage-parity` phase to `scripts/validate.sh`:
+    - consistent summary entries for backend set (`["file","keratin"]`)
+    - replay-profile metadata carried in the same summary format used by startup validation.
+  - Kept `proptest.sh` crate list aligned with storage, keeping all backend fuzz surfaces in one harness.
+
+- Validation:
+  - `bash scripts/storage-parity.sh`
+  - `bash scripts/validate.sh --skip-jepsen --skip-fuzz`
+
+- Observed behavior:
+  - The previous hang is tied to an unrelated long-running background invocation path, not core storage/openraft code paths. Direct targeted storage/openraft validation is now stable.
+
+### Short-Term Roadmap
+
+#### Resolution target: confidence on reusable local validation
+
+1. Make `scripts/validate.sh` the default local gate for storage parity + startup smoke + fuzz profiles.
+2. Keep backend-aware regression artifacts visible and preserved through CI and local reruns.
+3. Keep recovery/profile behavior explicit in summary artifacts for both storage + startup constructors.
+
+### Medium-Term Roadmap
+
+#### Resolution target: durability-aware metadata control plane
+
+1. Expand Jepsen-style persistence scenarios to exercise both file and keratin restart/rejoin/failover transitions.
+2. Add durability telemetry around durability append/truncate/clear operations.
+3. Replace placeholder consensus transport path with openraft runtime while preserving persisted contracts.
+
+### Long-Term Roadmap
+
+#### Resolution target: configurable persistence strategy
+
+1. Add additional `MetadataLog` adapters behind a stable catalog interface.
+2. Add retention and compaction tooling for metadata durability.
+3. Move planner strategy registry into reusable operator configuration and policy catalogs.

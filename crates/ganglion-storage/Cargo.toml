@@ -16,3 +16,6 @@ serde_json = "1"
 [dependencies.keratin-log]
 path = "../../../keratin/keratin-log"
 optional = true
+
+[dev-dependencies]
+proptest = "1"
