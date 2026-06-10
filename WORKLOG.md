@@ -883,3 +883,30 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Expand `MetadataLog` adapter catalog and policy hooks.
   2. Add retention/compaction tooling for durable metadata logs.
   3. Move planner and persistence-profile selection into operator-facing registry surfaces.
+
+## v28 execution pass completed
+
+- `scripts/validate.sh`:
+  - added final terminal-failure gating for all requested validation phases.
+  - now exits with status 1 when any requested phase result is not `pass` after summary is written.
+  - ensures Jepsen aggregate failures (including missing/malformed artifacts or failing scenario totals) fail the command, not just the summary JSON.
+- Verification hygiene:
+  - retained summary generation on all requested runs so post-mortem artifacts are always available.
+  - preserved existing skip behavior (`--skip-*` flags) and did not change successful pass paths.
+- Operational note:
+  - the environment-specific hang still appears tied to a separate background invocation path; focused scenario/replay commands remain stable.
+
+## v28 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep one-shot validation as the primary CI gate and treat aggregate artifact checks as hard failures.
+  2. Extend persistence scenarios with explicit backend ordering checks for restart/failover sequences.
+  3. Keep scenario-level Jepsen reruns plus artifact preflight as the first recovery path when full gates stall.
+- Medium-term:
+  1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+  2. Add committed-snapshot publication channels and durability telemetry.
+  3. Expand persistence scenarios with explicit multi-backend restart choreography.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move planner and persistence-profile selection into operator-facing registry surfaces.

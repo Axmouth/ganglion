@@ -1195,3 +1195,49 @@ Make aggregate Jepsen reruns deterministic and self-checking based on scenario a
 1. Expand `MetadataLog` adapter catalog and policy hooks.
 2. Add retention/compaction tooling for durable metadata logs.
 3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## Plan Snapshot v28
+
+### Goal
+
+Make all one-shot validation phases fail fast and fail the process on aggregate failure.
+
+### Completed in this snapshot
+
+- `scripts/validate.sh`:
+  - added terminal process-failure checks after summary generation.
+  - enforces non-zero exit when any requested phase is not in `pass` state, including:
+    - fmt,
+    - tests,
+    - storage parity,
+    - startup smoke,
+    - proptest,
+    - jepsen (including aggregate artifact verification failures).
+  - kept artifact writing behavior so `validate-summary.json` is preserved even when a phase fails.
+
+- `WORKLOG.md` and `PLAN.md`:
+  - appended a v28 pass entry to keep historical snapshots and execution records immutable.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational reliability while extending coverage
+
+1. Keep one-shot validation as the default gating path and enforce non-zero exit on aggregate artifact mismatches.
+2. Expand persistence scenario assertions to cover explicit restart/failover ordering for multi-backend parity coverage.
+3. Keep scenario-level reruns the first isolation point when full gates appear to stall.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport/runtime readiness
+
+1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+2. Add committed-snapshot publication channels and durability telemetry.
+3. Expand restart/failover persistence scenarios with explicit backend sequencing.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Expand `MetadataLog` adapter catalog and policy hooks.
+2. Add retention/compaction tooling for durable metadata logs.
+3. Move planner and persistence-profile selection into operator-facing registry surfaces.

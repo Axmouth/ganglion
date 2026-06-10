@@ -324,4 +324,34 @@ fi
 mkdir -p "$JEPSEN_ARTIFACT_DIR"
 write_summary
 
+if [[ "$RUN_FMT" == true && "$SUMMARY_FMT" != "pass" ]]; then
+  echo "validate: fmt check failed"
+  exit 1
+fi
+
+if [[ "$RUN_TESTS" == true && "$SUMMARY_TESTS" != "pass" ]]; then
+  echo "validate: tests failed"
+  exit 1
+fi
+
+if [[ "$RUN_STORAGE_PARITY" == true && "$SUMMARY_STORAGE_PARITY" != "pass" ]]; then
+  echo "validate: storage parity failed"
+  exit 1
+fi
+
+if [[ "$RUN_STARTUP_SMOKE" == true && "$SUMMARY_STARTUP_SMOKE" != "pass" ]]; then
+  echo "validate: startup smoke failed"
+  exit 1
+fi
+
+if [[ "$RUN_PROPT" == true && "$SUMMARY_PROPT" != "pass" ]]; then
+  echo "validate: proptest failed"
+  exit 1
+fi
+
+if [[ "$RUN_JEPSEN" == true && "$SUMMARY_JEPSEN" != "pass" ]]; then
+  echo "validate: jepsen artifacts validation failed"
+  exit 1
+fi
+
 echo "validate: completed"
