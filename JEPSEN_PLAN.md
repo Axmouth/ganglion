@@ -69,6 +69,9 @@ It is a roadmap artifact, not a time-based log.
   - reusable cluster orchestration scripts,
   - result collection checklist.
 - Integration into CI behind a separate workflow/job that runs when openraft adapter is replaced.
+- Runtime result collection:
+  - each scenario writes `<scenario>.json` with status + expected-invariant metadata,
+  - each `run.sh all` invocation writes `run-summary.json` aggregating all scenario artifacts.
 
 ### Fallback execution (current)
 
@@ -81,3 +84,9 @@ It is a roadmap artifact, not a time-based log.
 - No test should treat “new follower start” as a no-op publish path.
 - Planner output after every accepted snapshot should be deterministically reproducible.
 - Consensus-layer rejection paths must be exercised with generated inputs, not only fixed fixtures.
+
+### Validation stability note
+
+- Hang behavior observed during earlier broad validation runs is tied to an unrelated long-running background invocation path.
+- Direct scenario execution and targeted module tests remain stable under this condition.
+- When a one-shot aggregate command appears to stall, run a focused scenario first (`tests/jepsen/run.sh scenario <name>`) and confirm no orphaned validation processes are still active before retrying full coverage.

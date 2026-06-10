@@ -733,3 +733,88 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Introduce configurable retention and compaction policies per adapter.
   2. Expand adapter catalog for additional metadata storage families.
   3. Move strategy registries (planner and persistence profile) into operator-facing configuration.
+
+## v23 execution pass completed
+
+- `tests/jepsen/run.sh`:
+  - Added per-scenario machine-readable result files:
+    - `<scenario>.json` with status, exit code, log path, and expected invariant list.
+  - Added `run-summary.json` aggregate artifact for `run.sh all` and `run.sh scenario`.
+- `scripts/validate.sh`:
+  - Extended `validate-summary.json` to include Jepsen aggregate fields:
+    - `jepsen.summary_file`,
+    - total/failed scenario counts,
+    - embedded scenario objects when run summary is available.
+- `JEPSEN_PLAN.md`:
+  - Added result-collection details so scenario artifacts are explicit in the plan artifact model.
+
+- Verification:
+  - `tests/jepsen/run.sh all --artifact-dir /tmp/jepsen-artifacts-test`
+  - `tests/jepsen/run.sh scenario 06-persistence-backend-parity`
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep structured per-scenario summary JSON stable and parseable for CI consumption.
+  2. Add mixed-tail/recovery startup cases into persistence parity scenario coverage.
+  3. Keep scenario execution order and artifact naming deterministic across runs.
+- Medium-term:
+  1. Replace placeholder consensus transport with a real openraft runtime path.
+  2. Add durability telemetry around adapter append/clear/truncate and startup recovery behavior.
+  3. Expand failover/rejoin persistence scenarios to explicitly sequence restarts by backend.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## v24 execution pass completed
+
+- `WORKLOG.md` / `PLAN.md` / `JEPSEN_PLAN.md` / `tests/jepsen/README.md`:
+  - Added a permanent operational finding that prior hang behavior in this environment is reproducibly tied to an external long-running background invocation path.
+  - Noted that direct scenario-level and targeted validation commands continue to run stably in those conditions.
+  - Added runbook guidance to isolate hangs by:
+    - running `tests/jepsen/run.sh scenario ...` before broad aggregate commands,
+    - checking for orphaned background validation invocations before re-running one-shot gates.
+- `scripts/validate.sh`:
+  - No logic changes; this pass only captures evidence and triage guidance in docs and planning records.
+
+## v24 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep a visible validation triage checklist in runbooks while the long-running background path is still present.
+  2. Add mixed-tail/recovery startup assertions explicitly in persistence parity scenario checks.
+  3. Gate aggregate validation runs on deterministic scenario summary artifacts when possible.
+- Medium-term:
+  1. Replace placeholder consensus transport with real openraft runtime while preserving current contracts.
+  2. Add durability telemetry around adapter append/clear/truncate operations and startup recovery behavior.
+  3. Expand persistence failover/rejoin scenarios to explicitly sequence restarts across backends.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## v25 execution pass completed
+
+- `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+  - Expanded fallback assertions to run mixed-tail and startup-recovery startup cases directly:
+    - `persisted_node_startup_profile_selection_with_mixed_tail_and_explicit_override`
+    - `persisted_node_recovered_startup_replays_control_loop_on_next_apply`
+    - `persisted_node_startup_entrypoint_smoke_checks`
+  - Kept existing file/Keratin boundary tests in place.
+- Notes:
+  - This makes the persistence parity scenario explicitly exercise mixed-tail + recovery-startup behavior without relying on broad module test filters.
+
+## v25 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep mixed-tail and recovery-startup checks in scenario coverage while monitoring runtime duration.
+  2. Add a lightweight validation preflight for scenario summary completeness (`<scenario>.json` + run-summary).
+  3. Keep operator-facing hang triage guidance in place until one-shot background invocations are no longer a practical risk.
+- Medium-term:
+  1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+  2. Add committed-snapshot publication channels and durability telemetry.
+  3. Expand restart/failover persistence scenarios with backend sequencing.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move strategy registries (planner and persistence profile) into reusable operator configuration.

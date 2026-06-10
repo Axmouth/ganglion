@@ -43,6 +43,15 @@ If Clojure/Jepsen is not available in the environment, scenario scripts will emi
 
 `validate-summary.json` also includes `startup_smoke` with `requested` and `result` fields (`pass`/`skipped`/`fail` behavior), aligned with other run phases.
 
+### Hang triage
+
+If a broad `scripts/validate.sh` or `tests/jepsen/run.sh all` invocation appears to stall, use this sequence:
+
+- Start with a focused scenario run:
+  - `tests/jepsen/run.sh scenario <scenario-name>`
+- Confirm artifacts are produced under the chosen artifact directory.
+- Re-run the full aggregate only after checking for orphaned background invocations from prior runs.
+
 ## Scenario inventory
 
 - `01-baseline-failover.sh`
@@ -55,4 +64,7 @@ If Clojure/Jepsen is not available in the environment, scenario scripts will emi
 ## Current status
 
 - Scenario orchestration is available with a local fallback that runs focused Rust smoke checks when a Jepsen/Clojure runtime is unavailable.
+- Each run produces both human-readable logs and machine-readable scenario summaries:
+  - `<scenario>.log` and `<scenario>.json` under `tests/jepsen/artifacts/`
+  - `run-summary.json` with aggregate scenario status for `all` and `scenario` commands
 - Placeholder harness hooks remain for future direct Jepsen wiring.

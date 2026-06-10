@@ -128,6 +128,17 @@ run_jepsen() {
 }
 
 write_summary() {
+  local jepsen_summary_file="${JEPSEN_ARTIFACT_DIR}/run-summary.json"
+  local jepsen_run_summary='null'
+  local jepsen_total_scenarios='0'
+  local jepsen_failed_scenarios='0'
+
+  if [[ -f "$jepsen_summary_file" ]]; then
+    jepsen_run_summary="$(cat "$jepsen_summary_file")"
+    jepsen_total_scenarios="$(jq -r '.scenarios | length' "$jepsen_summary_file")"
+    jepsen_failed_scenarios="$(jq -r '[.scenarios[] | select(.status != "pass")] | length' "$jepsen_summary_file")"
+  fi
+
   local summary_file="$JEPSEN_ARTIFACT_DIR/validate-summary.json"
   local replay_profile_raw="${GANGLION_PERSISTED_REPLAY_PROFILE:-<unset>}"
   local replay_profile_effective="$replay_profile_raw"
@@ -139,52 +150,77 @@ write_summary() {
     replay_profile_source="environment"
   fi
 
-  cat <<EOF > "$summary_file"
-{
-  "script": "scripts/validate.sh",
-  "workspace": "$ROOT_DIR",
-  "jepsen_artifact_dir": "$JEPSEN_ARTIFACT_DIR",
-  "replay_profile": {
-    "env_var": "$PERSISTED_REPLAY_PROFILE_ENV",
-    "value": "$replay_profile_raw",
-    "effective": "$replay_profile_effective",
-    "source": "$replay_profile_source"
-  },
-  "runs": {
-    "fmt": {
-      "requested": $RUN_FMT,
-      "result": "$SUMMARY_FMT"
-    },
-  "tests": {
-      "requested": $RUN_TESTS,
-      "result": "$SUMMARY_TESTS"
-    },
-    "storage_parity": {
-      "requested": $RUN_STORAGE_PARITY,
-      "result": "$SUMMARY_STORAGE_PARITY",
-      "backends": ["file","keratin"],
-      "startup_replay_profile": {
-        "env_var": "$PERSISTED_REPLAY_PROFILE_ENV",
-        "value": "$replay_profile_raw",
-        "effective": "$replay_profile_effective",
-        "source": "$replay_profile_source"
+  jq -n \
+    --arg script "scripts/validate.sh" \
+    --arg workspace "$ROOT_DIR" \
+    --arg jepsen_artifact_dir "$JEPSEN_ARTIFACT_DIR" \
+    --argjson fmt_requested "$RUN_FMT" \
+    --arg result_fmt "$SUMMARY_FMT" \
+    --argjson tests_requested "$RUN_TESTS" \
+    --arg result_tests "$SUMMARY_TESTS" \
+    --argjson storage_parity_requested "$RUN_STORAGE_PARITY" \
+    --arg result_storage_parity "$SUMMARY_STORAGE_PARITY" \
+    --argjson startup_smoke_requested "$RUN_STARTUP_SMOKE" \
+    --arg result_startup_smoke "$SUMMARY_STARTUP_SMOKE" \
+    --argjson proptest_requested "$RUN_PROPT" \
+    --arg result_proptest "$SUMMARY_PROPT" \
+    --argjson jepsen_requested "$RUN_JEPSEN" \
+    --arg result_jepsen "$SUMMARY_JEPSEN" \
+    --arg replay_env_var "$PERSISTED_REPLAY_PROFILE_ENV" \
+    --arg replay_raw "$replay_profile_raw" \
+    --arg replay_effective "$replay_profile_effective" \
+    --arg replay_source "$replay_profile_source" \
+    --argjson jepsen_total "$jepsen_total_scenarios" \
+    --argjson jepsen_failed "$jepsen_failed_scenarios" \
+    --argjson jepsen_summary "$jepsen_run_summary" \
+    '{
+      "script": $script,
+      "workspace": $workspace,
+      "jepsen_artifact_dir": $jepsen_artifact_dir,
+      "replay_profile": {
+        "env_var": $replay_env_var,
+        "value": $replay_raw,
+        "effective": $replay_effective,
+        "source": $replay_source
+      },
+      "runs": {
+      "fmt": {
+          "requested": $fmt_requested,
+          "result": $result_fmt
+        },
+        "tests": {
+          "requested": $tests_requested,
+          "result": $result_tests
+        },
+        "storage_parity": {
+          "requested": $storage_parity_requested,
+          "result": $result_storage_parity,
+          "backends": ["file","keratin"],
+          "startup_replay_profile": {
+            "env_var": $replay_env_var,
+            "value": $replay_raw,
+            "effective": $replay_effective,
+            "source": $replay_source
+          }
+        },
+        "startup_smoke": {
+          "requested": $startup_smoke_requested,
+          "result": $result_startup_smoke
+        },
+        "proptest": {
+          "requested": $proptest_requested,
+          "result": $result_proptest
+        },
+        "jepsen": {
+          "requested": $jepsen_requested,
+          "result": $result_jepsen,
+          "summary_file": ($jepsen_artifact_dir + "/run-summary.json"),
+          "total_scenarios": $jepsen_total,
+          "failed_scenarios": $jepsen_failed,
+          "scenarios": ($jepsen_summary | .scenarios? // [])
+        }
       }
-    },
-    "startup_smoke": {
-      "requested": $RUN_STARTUP_SMOKE,
-      "result": "$SUMMARY_STARTUP_SMOKE"
-    },
-    "proptest": {
-      "requested": $RUN_PROPT,
-      "result": "$SUMMARY_PROPT"
-    },
-    "jepsen": {
-      "requested": $RUN_JEPSEN,
-      "result": "$SUMMARY_JEPSEN"
-    }
-  }
-}
-EOF
+    }' > "$summary_file"
   echo "validate: wrote summary to $summary_file"
 }
 

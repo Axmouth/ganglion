@@ -21,5 +21,7 @@ cargo test -p ganglion-storage --features keratin -- --test-threads=1 fuzz_kerat
 cargo test -p ganglion-storage --features keratin -- --test-threads=1 keratin_metadata_log_recoverable_non_sequential_tail --quiet
 cargo test -p ganglion-storage --features keratin -- --test-threads=1 keratin_metadata_log_rejects_non_sequential_index --quiet
 
-cargo test -p ganglion-openraft persisted_node_startup --quiet
+cargo test -p ganglion-openraft persisted_node_startup_profile_selection_with_mixed_tail_and_explicit_override --quiet
+cargo test -p ganglion-openraft persisted_node_recovered_startup_replays_control_loop_on_next_apply --quiet
+cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet
 echo "INFO: persistence-backend-parity completed"
