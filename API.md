@@ -89,9 +89,16 @@ This file tracks what each part of the current scaffolding is meant to do.
   - In-memory implementation used by tests.
 - `FileMetadataLog`
   - Append-only file-backed log that writes newline-delimited JSON entries.
-  - Replay performs strict index validation and returns storage parse errors on malformed/corrupt payloads.
+  - Replay validates index continuity by default and rejects malformed/invalid entries.
+  - Supports configurable replay policy through `FileMetadataReplayPolicy`:
+    - `Strict` for hard-fail validation
+    - `TruncateTail { max_tail_lines }` to recover from bounded trailing corruption.
 - `MetadataLogEntry`
   - Term/index/snapshot records stored by durable implementations.
+- `FileMetadataReplayPolicy`
+  - Storage replay policy for file logs, selected at constructor time.
+- `PersistedMetadataNode::new_with_replay_policy`
+  - File-backed node constructor that allows bounded-tail recoverability choices at startup.
 
 ## Planned next part
 

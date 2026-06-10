@@ -21,6 +21,8 @@ coverage/
 /fuzz-artifacts/
 **/fuzz/
 **/fuzz-artifacts/
+/tests/jepsen/artifacts/
+/tests/jepsen/artifacts/**
 **/proptest-regressions/
 !crates/ganglion-core/proptest-regressions/
 !crates/ganglion-openraft/proptest-regressions/

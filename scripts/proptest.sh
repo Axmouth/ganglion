@@ -40,9 +40,7 @@ run_fuzz_suite() {
   mkdir -p "$regression_dir"
   echo "Running proptest suite: $crate_name"
   PROPTEST_REGRESSION_DIR="$regression_dir" \
-    cargo test -p "$crate_name" "$@" \
-    --test-threads=1 \
-    --all-features
+    cargo test -p "$crate_name" --all-features "$@" -- --test-threads=1
 }
 
 run_mode() {

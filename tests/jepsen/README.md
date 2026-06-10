@@ -19,6 +19,15 @@ Use:
 - `tests/jepsen/run.sh all`
 - `tests/jepsen/run.sh scenario baseline-failover`
 - `scripts/jepsen.sh all` (CI-targetable wrapper).
+- `scripts/validate.sh` (runs fmt, tests, proptests, and all Jepsen scenarios).
+
+`scripts/validate.sh` is the preferred one-shot local/CI validation path.  
+It accepts:
+- `--skip-fmt`
+- `--skip-tests`
+- `--skip-fuzz`
+- `--skip-jepsen`
+- `--jepsen-artifact-dir <path>`
 
 If Clojure/Jepsen is not available in the environment, scenario scripts will emit
 `SKIPPED` and still write a log file so orchestration can continue.

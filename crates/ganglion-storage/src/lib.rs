@@ -114,6 +114,24 @@ pub trait MetadataLog: Send + Sync + fmt::Debug {
     fn truncate_from(&self, first_index: u64) -> Result<(), MetadataLogError>;
 }
 
+/// Replay policy for file-backed metadata logs.
+#[derive(Debug, Clone, Copy)]
+pub enum FileMetadataReplayPolicy {
+    /// Fail hard on malformed or non-sequential records.
+    Strict,
+    /// Discard a bounded tail of unparsable/unordered lines and recover the earlier prefix.
+    ///
+    /// Recovery is only allowed when the number of trailing non-blank lines that cannot be
+    /// parsed into a consistent log does not exceed `max_tail_lines`.
+    TruncateTail { max_tail_lines: usize },
+}
+
+impl Default for FileMetadataReplayPolicy {
+    fn default() -> Self {
+        Self::Strict
+    }
+}
+
 /// In-memory metadata log used for tests and non-durable adapters.
 #[derive(Debug, Default)]
 pub struct InMemoryMetadataLog {
@@ -192,6 +210,7 @@ impl MetadataLog for InMemoryMetadataLog {
 pub struct FileMetadataLog {
     path: PathBuf,
     guard: Arc<RwLock<()>>,
+    replay_policy: FileMetadataReplayPolicy,
 }
 
 impl FileMetadataLog {
@@ -199,6 +218,18 @@ impl FileMetadataLog {
         Self {
             path: path.into(),
             guard: Arc::new(RwLock::new(())),
+            replay_policy: FileMetadataReplayPolicy::default(),
+        }
+    }
+
+    pub fn with_replay_policy(
+        path: impl Into<PathBuf>,
+        replay_policy: FileMetadataReplayPolicy,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            guard: Arc::new(RwLock::new(())),
+            replay_policy,
         }
     }
 
@@ -210,31 +241,79 @@ impl FileMetadataLog {
         };
 
         let reader = BufReader::new(file);
+        let raw_lines = reader
+            .lines()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MetadataLogError::io)?;
         let mut entries = Vec::new();
-        for (line_offset, line_result) in reader.lines().enumerate() {
-            let line = line_result.map_err(MetadataLogError::io)?;
+
+        for (line_offset, line) in raw_lines.iter().enumerate() {
             let cleaned = line.trim();
             if cleaned.is_empty() || cleaned.starts_with('#') {
                 continue;
             }
 
             let line_no = line_offset + 1;
-            let persisted = serde_json::from_str::<PersistedMetadataLogEntry>(cleaned)
-                .map_err(|error| MetadataLogError::parse_with_line(error, line_no))?;
+            let persisted = match serde_json::from_str::<PersistedMetadataLogEntry>(cleaned) {
+                Ok(entry) => entry,
+                Err(error) => {
+                    let remaining_tail_lines = raw_lines
+                        .iter()
+                        .skip(line_offset + 1)
+                        .filter(|candidate| {
+                            let cleaned = candidate.trim();
+                            !cleaned.is_empty() && !cleaned.starts_with('#')
+                        })
+                        .count()
+                        + 1;
+
+                    return self.recoverable_tail_error(
+                        MetadataLogError::parse_with_line(error, line_no),
+                        remaining_tail_lines,
+                        &entries,
+                    );
+                }
+            };
 
             let expected_index = entries
                 .last()
                 .map_or(1u64, |entry: &MetadataLogEntry| entry.index + 1);
             if persisted.index == 0 {
-                return Err(MetadataLogError::Parse(format!(
+                let error = MetadataLogError::Parse(format!(
                     "line {line_no}: metadata log index must be >= 1"
-                )));
+                ));
+                return self.recoverable_tail_error(
+                    error,
+                    raw_lines
+                        .iter()
+                        .skip(line_offset + 1)
+                        .filter(|candidate| {
+                            let cleaned = candidate.trim();
+                            !cleaned.is_empty() && !cleaned.starts_with('#')
+                        })
+                        .count()
+                        + 1,
+                    &entries,
+                );
             }
             if persisted.index != expected_index {
-                return Err(MetadataLogError::Parse(format!(
+                let error = MetadataLogError::Parse(format!(
                     "line {line_no}: non-sequential log index; expected {expected_index}, got {}",
                     persisted.index
-                )));
+                ));
+                return self.recoverable_tail_error(
+                    error,
+                    raw_lines
+                        .iter()
+                        .skip(line_offset + 1)
+                        .filter(|candidate| {
+                            let cleaned = candidate.trim();
+                            !cleaned.is_empty() && !cleaned.starts_with('#')
+                        })
+                        .count()
+                        + 1,
+                    &entries,
+                );
             }
 
             let snapshot = decode_snapshot(persisted.snapshot)?;
@@ -246,6 +325,24 @@ impl FileMetadataLog {
         }
 
         Ok(entries)
+    }
+
+    fn recoverable_tail_error(
+        &self,
+        error: MetadataLogError,
+        skipped_tail_lines: usize,
+        entries: &[MetadataLogEntry],
+    ) -> Result<Vec<MetadataLogEntry>, MetadataLogError> {
+        match self.replay_policy {
+            FileMetadataReplayPolicy::Strict => Err(error),
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines } => {
+                if skipped_tail_lines <= max_tail_lines {
+                    Ok(entries.to_vec())
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     fn write_entries(
@@ -521,6 +618,92 @@ mod tests {
 
         let log = FileMetadataLog::new(path);
         let err = log.entries().expect_err("zero index should fail");
+        assert!(matches!(err, MetadataLogError::Parse(_)));
+    }
+
+    #[test]
+    fn file_metadata_log_truncates_small_tailing_corruption_tail() {
+        let path = unique_temp_path("tail-corruption");
+        write_raw_entry(
+            &path,
+            PersistedMetadataLogEntry {
+                term: 1,
+                index: 1,
+                snapshot: encode_snapshot(&CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                })
+                .expect("encode snapshot"),
+            },
+        )
+        .expect("write valid entry");
+        write_raw_entry(
+            &path,
+            PersistedMetadataLogEntry {
+                term: 1,
+                index: 2,
+                snapshot: encode_snapshot(&CoordinationSnapshot {
+                    generation: 2,
+                    ..Default::default()
+                })
+                .expect("encode snapshot"),
+            },
+        )
+        .expect("write valid entry");
+        {
+            use std::io::Write as _;
+            let mut file = File::options()
+                .append(true)
+                .open(&path)
+                .expect("open for append");
+            file.write_all(b"{not-json}\n")
+                .expect("append malformed tail");
+        }
+
+        let log = FileMetadataLog::with_replay_policy(
+            path,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        );
+        let entries = log
+            .entries()
+            .expect("truncation policy should recover consistent prefix");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].snapshot.generation, 2);
+    }
+
+    #[test]
+    fn file_metadata_log_rejects_large_tailing_corruption_tail() {
+        let path = unique_temp_path("tail-corruption-limit");
+        write_raw_entry(
+            &path,
+            PersistedMetadataLogEntry {
+                term: 1,
+                index: 1,
+                snapshot: encode_snapshot(&CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                })
+                .expect("encode snapshot"),
+            },
+        )
+        .expect("write valid entry");
+        let raw = b"{bad}\n{bad}\n{bad}\n";
+        {
+            use std::io::Write as _;
+            let mut file = File::options()
+                .append(true)
+                .open(&path)
+                .expect("open for append");
+            file.write_all(raw).expect("append malformed lines");
+        }
+
+        let log = FileMetadataLog::with_replay_policy(
+            path,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        );
+        let err = log
+            .entries()
+            .expect_err("too much trailing corruption should fail");
         assert!(matches!(err, MetadataLogError::Parse(_)));
     }
 }

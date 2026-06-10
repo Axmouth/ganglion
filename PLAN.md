@@ -382,3 +382,60 @@ Make durable recovery behavior deterministic under malformed logs and make fault
 1. Provide planner strategy registry with parameterized pluggable policies.
 2. Add snapshot compaction and migration utilities around durable logs.
 3. Expand backend adapters (Keratin + optional external stores) with stable trait compatibility.
+
+## Plan Snapshot v10
+
+### Goal
+
+Expose configurable startup recovery behavior and reduce validation friction by adding one-shot checks.
+
+### Completed in this snapshot
+
+- `ganglion-storage` recovery policy:
+  - Added `FileMetadataReplayPolicy` (`Strict`, `TruncateTail { max_tail_lines }`).
+  - Added bounded-tail recovery in file-log replay for malformed/non-sequential/zero-index tails.
+  - Added tests for:
+    - strict behavior remains rejecting malformed inputs,
+    - bounded tail corruption recovery succeeds when inside limit,
+    - bounded tail corruption recovery fails when it exceeds limit.
+- `ganglion-openraft` persistence integration:
+  - Added `PersistedMetadataNode::new_with_replay_policy`.
+  - Kept default constructor strict behavior by default.
+  - Added test showing persisted nodes can recover state from bounded corrupt tails using
+    `TruncateTail`.
+- Validation ergonomics:
+  - Added `scripts/validate.sh` one-shot entrypoint that can run:
+    - `cargo fmt --all --check`,
+    - `cargo test --workspace --quiet`,
+    - `scripts/proptest.sh run`,
+    - `tests/jepsen/run.sh all`.
+  - Added skip flags and configurable Jepsen artifact directory support.
+  - Added `tests/jepsen/artifacts/**` and related script artifacts to `.gitignore`.
+- Documentation:
+  - Updated `tests/jepsen/README.md` with one-shot validation usage.
+  - Updated `API.md` to include configurable storage replay policy and constructor.
+
+### Short-term Roadmap
+
+#### Resolution target: confidence before transport swap
+
+1. Use bounded-tail recovery policy from the default persisted constructor when operating
+   with known append-only segment backends.
+2. Make proptest and Jepsen runs part of one scriptable local/CI default path.
+3. Add one small malformed-tail regression that validates openraft restart behavior end-to-end.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Expose committed-snapshot events with optional watchers or event sinks.
+3. Expand Jepsen fallback scenario replay and make it script-driven from the same validator.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and history retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.

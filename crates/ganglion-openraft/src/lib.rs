@@ -5,7 +5,8 @@ use ganglion_core::{
     CoordinationSnapshot, PartitionPlacementPolicy, PlacementError, PlacementInput as PlannerInput,
 };
 use ganglion_storage::{
-    FileMetadataLog, InMemoryMetadataLog, MetadataLog, MetadataLogEntry, MetadataLogError,
+    FileMetadataLog, FileMetadataReplayPolicy, InMemoryMetadataLog, MetadataLog, MetadataLogEntry,
+    MetadataLogError,
 };
 
 /// A narrow error surface for the initial adapter scaffold.
@@ -363,7 +364,27 @@ impl PersistedMetadataNode {
         node_id: impl Into<String>,
         initial_snapshot: CoordinationSnapshot,
     ) -> Result<Self, OpenraftAdapterError> {
-        let log = Box::new(FileMetadataLog::new(path));
+        Self::new_with_replay_policy(
+            path,
+            node_id,
+            initial_snapshot,
+            FileMetadataReplayPolicy::Strict,
+        )
+    }
+
+    pub fn new_with_replay_policy<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        replay_policy: FileMetadataReplayPolicy,
+    ) -> Result<Self, OpenraftAdapterError> {
+        let path = path.into();
+        let log = match replay_policy {
+            FileMetadataReplayPolicy::Strict => Box::new(FileMetadataLog::new(path)),
+            FileMetadataReplayPolicy::TruncateTail { .. } => {
+                Box::new(FileMetadataLog::with_replay_policy(path, replay_policy))
+            }
+        };
         let inner = MetadataNode::new(node_id, initial_snapshot, log)?;
         Ok(Self { inner })
     }
@@ -859,6 +880,58 @@ mod tests {
         let err = PersistedMetadataNode::new(path, "node-a", CoordinationSnapshot::default())
             .expect_err("invalid log must be rejected");
         assert!(matches!(err, OpenraftAdapterError::Storage(_)));
+    }
+
+    #[test]
+    fn persisted_node_tolerates_truncated_tail_corruption_when_enabled() {
+        let path = unique_temp_path("tolerate-tail");
+        let writer =
+            PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                .expect("writer should initialize");
+        writer.set_leader("node-a");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                },
+                Some(1),
+            )
+            .expect("first write");
+        writer
+            .apply_snapshot(
+                "node-a",
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                },
+                None,
+            )
+            .expect("second write");
+
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write as _;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("append corrupted line");
+            file.write_all(b"{not-json}\n")
+                .expect("append malformed tail");
+        }
+
+        let recovered = PersistedMetadataNode::new_with_replay_policy(
+            path,
+            "node-a",
+            CoordinationSnapshot::default(),
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        )
+        .expect("node should recover from bounded tail corruption");
+
+        assert_eq!(recovered.snapshot().generation, 2);
+        assert_eq!(recovered.current_term(), 1);
+        assert_eq!(recovered.log_len(), 2);
     }
 
     #[test]
