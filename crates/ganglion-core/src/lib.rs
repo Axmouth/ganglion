@@ -245,6 +245,47 @@ pub struct PlacementPlan {
     pub snapshot: CoordinationSnapshot,
 }
 
+/// Pluggable placement strategy keys.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PlacementStrategy {
+    /// Stable owner/rebalancing strategy based on previous assignments when possible.
+    Deterministic,
+    /// Spread ownership by current assignment load to avoid repeated hot owners.
+    LeastLoaded,
+}
+
+impl PlacementStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deterministic => "deterministic",
+            Self::LeastLoaded => "least-loaded",
+        }
+    }
+
+    pub fn all() -> &'static [Self] {
+        const STRATEGIES: [PlacementStrategy; 2] = [
+            PlacementStrategy::Deterministic,
+            PlacementStrategy::LeastLoaded,
+        ];
+        &STRATEGIES
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "deterministic" | "det" | "default" => Some(Self::Deterministic),
+            "least-loaded" | "least_loaded" | "leastloaded" => Some(Self::LeastLoaded),
+            _ => None,
+        }
+    }
+
+    pub fn as_strategy(self) -> &'static dyn PartitionPlacementPolicy {
+        match self {
+            Self::Deterministic => &DeterministicPartitionPlacement,
+            Self::LeastLoaded => &LeastLoadedPartitionPlacement,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PlacementError {
     NoNodesForResources,
@@ -317,6 +358,112 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
             },
         })
     }
+}
+
+/// Load-aware policy:
+/// - Keep existing live owners when possible.
+/// - Otherwise pick the currently least-loaded live owner.
+/// - Preserve follower reuse where possible; fill followers in stable node-id order.
+#[derive(Debug, Clone, Copy)]
+pub struct LeastLoadedPartitionPlacement;
+
+impl PartitionPlacementPolicy for LeastLoadedPartitionPlacement {
+    fn plan(&self, input: PlacementInput) -> Result<PlacementPlan, PlacementError> {
+        let mut resources = input.resources;
+        resources.sort();
+        resources.dedup();
+
+        let nodes: Vec<String> = input.nodes.keys().cloned().collect();
+        if resources.is_empty() {
+            return Ok(PlacementPlan {
+                snapshot: CoordinationSnapshot {
+                    nodes: input.nodes,
+                    assignments: BTreeMap::new(),
+                    generation: input.generation,
+                },
+            });
+        }
+
+        if nodes.is_empty() {
+            return Err(PlacementError::NoNodesForResources);
+        }
+
+        let mut load = live_owner_load(&input.nodes, &input.existing);
+        let mut assignments = BTreeMap::new();
+
+        for resource in resources {
+            let existing = input.existing.get(&resource);
+            let owner = match existing {
+                Some(existing_assignment)
+                    if nodes.iter().any(|node| node == &existing_assignment.owner) =>
+                {
+                    existing_assignment.owner.clone()
+                }
+                _ => pick_least_loaded_owner(&nodes, &load),
+            };
+
+            let follower_set =
+                gather_followers(owner.as_str(), input.target_followers, &nodes, existing);
+            let epoch = match existing {
+                Some(existing) if existing.owner == owner => existing.epoch,
+                Some(existing) => existing.epoch.saturating_add(1),
+                None => 1,
+            };
+            let durability = existing
+                .map(|existing| existing.durability)
+                .unwrap_or_default();
+
+            if let Some(load_counter) = load.get_mut(&owner) {
+                *load_counter = load_counter.saturating_add(1);
+            }
+
+            assignments.insert(
+                resource.clone(),
+                PartitionAssignment {
+                    resource: resource.clone(),
+                    owner,
+                    followers: follower_set,
+                    epoch,
+                    durability,
+                },
+            );
+        }
+
+        Ok(PlacementPlan {
+            snapshot: CoordinationSnapshot {
+                nodes: input.nodes,
+                assignments,
+                generation: input.generation,
+            },
+        })
+    }
+}
+
+fn live_owner_load(
+    nodes: &BTreeMap<String, NodeInfo>,
+    existing: &BTreeMap<ResourceIdentity, PartitionAssignment>,
+) -> BTreeMap<String, usize> {
+    let mut load = nodes
+        .keys()
+        .map(|node_id| (node_id.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+
+    for assignment in existing.values() {
+        if nodes.contains_key(&assignment.owner) {
+            let counter = load.entry(assignment.owner.clone()).or_insert(0);
+            *counter = counter.saturating_add(1);
+        }
+    }
+
+    load
+}
+
+fn pick_least_loaded_owner(node_ids: &[String], load: &BTreeMap<String, usize>) -> String {
+    node_ids
+        .iter()
+        .min_by_key(|node| (load.get(*node).copied().unwrap_or(0), *node))
+        .cloned()
+        .expect("node ids must be non-empty when selecting owner")
 }
 
 fn pick_owner(idx: usize, node_ids: &[String], existing: Option<&PartitionAssignment>) -> String {
@@ -616,6 +763,82 @@ mod tests {
         };
 
         assert!(DeterministicPartitionPlacement.plan(input).is_err());
+    }
+
+    #[test]
+    fn placement_strategy_catalog_is_retrievable() {
+        let catalog = PlacementStrategy::all();
+        assert!(catalog.contains(&PlacementStrategy::Deterministic));
+        assert!(catalog.contains(&PlacementStrategy::LeastLoaded));
+        assert_eq!(
+            PlacementStrategy::parse("deterministic"),
+            Some(PlacementStrategy::Deterministic)
+        );
+        assert_eq!(
+            PlacementStrategy::parse("least_loaded"),
+            Some(PlacementStrategy::LeastLoaded)
+        );
+        assert!(PlacementStrategy::parse("unknown").is_none());
+
+        let resolved = PlacementStrategy::Deterministic.as_strategy();
+        let snapshot = CoordinationSnapshot {
+            nodes: sample_nodes(),
+            assignments: BTreeMap::new(),
+            generation: 0,
+        };
+        let plan = resolved
+            .plan(PlacementInput {
+                nodes: snapshot.nodes.clone(),
+                resources: vec![],
+                existing: BTreeMap::new(),
+                target_followers: 0,
+                generation: 1,
+            })
+            .expect("resolved strategy should plan empty resource sets");
+        assert_eq!(plan.snapshot.generation, 1);
+    }
+
+    #[test]
+    fn least_loaded_planner_balances_new_owners_under_load() {
+        let resources = vec![
+            ResourceIdentity::new("ns", "topic-a", 0, None::<String>),
+            ResourceIdentity::new("ns", "topic-b", 1, None::<String>),
+            ResourceIdentity::new("ns", "topic-c", 2, None::<String>),
+            ResourceIdentity::new("ns", "topic-d", 3, None::<String>),
+            ResourceIdentity::new("ns", "topic-e", 4, None::<String>),
+            ResourceIdentity::new("ns", "topic-f", 5, None::<String>),
+        ];
+        let input = PlacementInput {
+            nodes: sample_nodes(),
+            resources: resources.clone(),
+            existing: BTreeMap::new(),
+            target_followers: 1,
+            generation: 11,
+        };
+
+        let plan = LeastLoadedPartitionPlacement
+            .plan(input)
+            .expect("least-loaded planner should balance owners");
+
+        let mut owner_count = std::collections::BTreeMap::<String, usize>::new();
+        for assignment in plan.snapshot.assignments.values() {
+            *owner_count.entry(assignment.owner.clone()).or_default() += 1;
+            assert_eq!(assignment.epoch, 1);
+            assert_eq!(assignment.followers.len(), 1);
+        }
+
+        let counts = owner_count.values().copied().collect::<Vec<_>>();
+        let min_count = *counts.iter().min().unwrap_or(&0);
+        let max_count = *counts.iter().max().unwrap_or(&0);
+        assert!(max_count.saturating_sub(min_count) <= 1);
+
+        let node_a = owner_count.get("node-a").copied().unwrap_or_default();
+        let node_b = owner_count.get("node-b").copied().unwrap_or_default();
+        let node_c = owner_count.get("node-c").copied().unwrap_or_default();
+        assert_eq!(node_a, 2);
+        assert_eq!(node_b, 2);
+        assert_eq!(node_c, 2);
+        assert_eq!(plan.snapshot.generation, 11);
     }
 
     #[test]

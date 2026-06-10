@@ -27,12 +27,28 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Trait for pluggable placement strategy.
   - Pure function: `(PlacementInput) -> PlacementPlan`.
 
+- `PlacementStrategy`
+  - Pluggable strategy key used by consumers to select behavior.
+  - Built-ins:
+    - `deterministic`: owner/rebalancing strategy that preserves existing owner when possible.
+    - `least-loaded`: spreads owner assignments across live nodes by current ownership load.
+  - Provides helpers:
+    - `as_str()` for human-facing identifiers,
+    - `parse(&str)` for config-like selection,
+    - `all()` for discovery,
+    - `as_strategy()` for resolving a live strategy implementation.
+
 - `DeterministicPartitionPlacement`
   - First policy implementation.
   - Conservative behavior:
     - reuse existing owner if alive,
     - preserve follower order where possible,
     - fill missing follower slots predictably.
+
+- `LeastLoadedPartitionPlacement`
+  - Second built-in policy implementation.
+  - Preserves existing assignment when possible, otherwise selects least-owned live node
+    to reduce ownership hotspots.
 
 - `plan_local_assignment_transitions`
   - Produces local per-node role transitions from previous and next snapshots.

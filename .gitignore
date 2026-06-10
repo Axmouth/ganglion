@@ -5,6 +5,13 @@ target/
 *.rs.bk
 *.lock.bk
 *.log
+*.d
+*.dylib
+*.rlib
+*.rmeta
+*.so
+*.dll
+*.pdb
 
 # Test artifacts
 coverage/

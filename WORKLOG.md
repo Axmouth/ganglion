@@ -12,7 +12,7 @@ work in reverse-briefness order while keeping one live roadmap block.
 ### Short-term
 
 1. Complete openraft transport replacement for the consensus adapter without changing `MetadataConsensus` contracts.
-2. Keep validation-first posture: one-shot validator, storage parity, fuzz, and Jepsen fallback paths stable and artifact-driven.
+2. Add committed-snapshot publication surface and stable watcher wiring for consensus-driven consumers.
 3. Expand restart/failover and backend-sequencing assertions in persistence and control-loop scenarios.
 
 ### Medium-term
@@ -23,7 +23,7 @@ work in reverse-briefness order while keeping one live roadmap block.
 
 ### Long-term
 
-1. Mature planner strategy registry and strategy-configuration surfaces.
+1. Promote strategy-configurable planner selection to user-configurable runtime configuration.
 2. Expand persistence adapters and durable metadata maintenance tooling (retention/compaction/migration).
 3. Generalize package-level integration so queue-specific consumers stay decoupled from `ganglion` primitives.
 
@@ -284,3 +284,18 @@ work in reverse-briefness order while keeping one live roadmap block.
   - checks persisted log length and reset behavior consistency.
 - Added this test to scenario coverage as explicit failover ordering invariant.
 - Updated `JEPSEN_PLAN.md` to document restart/failover ordering as required coverage.
+
+## Iteration 32 — Planner strategy pluggability
+
+- Added `PlacementStrategy` in `ganglion-core` as a runtime strategy catalog entry point.
+- Added `LeastLoadedPartitionPlacement` as the first alternate strategy.
+- Exposed strategy helpers for discoverability and config-style selection:
+  - `all()`
+  - `as_str()`
+  - `parse()`
+  - `as_strategy()`
+- Added tests in `ganglion-core` for:
+  - strategy catalog resolution and unknown-strategy behavior,
+  - least-loaded balancing under empty and non-zero load conditions.
+- Reworked `.gitignore` with additional rust-native artifact patterns (`*.dll`, `*.dylib`, `*.rlib`, etc.).
+- Updated `API.md` and active plan/refinement notes to track pluggable strategy surface as implemented.

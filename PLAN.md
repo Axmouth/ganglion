@@ -40,11 +40,12 @@ rather than a design driver.
 - Add a committed-snapshot publication surface (watcher/event stream) as a separate concern from consensus apply.
 - Add explicit restart/failover regression coverage for control-loop continuity and multi-backend recovery ordering.
 - Keep openraft feature usage optional and fully gated behind explicit Cargo features.
+- Add a pluggable planner strategy registry and at least one alternate strategy implementation (`least-loaded`) with deterministic selector helpers.
 
 ## Short-term roadmap
 
 - Complete openraft transport-path replacement for the consensus adapter, while keeping `MetadataConsensus` semantics unchanged.
-- Add at least one planner-strategy example implementation and document how it differs from deterministic default behavior.
+- Add pluggable strategy selection controls and keep the catalog discoverable for callers (`deterministic`, `least-loaded`).
 - Finalize backend-aware scenario coverage for restart/failover sequencing (file + keratin path parity).
 
 ## Medium-term roadmap
@@ -58,4 +59,3 @@ rather than a design driver.
 - Expand backend adapters and retention/compaction tooling for durable metadata logs.
 - Promote operator-oriented strategy/telemetry configuration without binding to a single domain model.
 - Provide upgrade-friendly schema and migration hooks for persisted metadata snapshots and replay records.
-
