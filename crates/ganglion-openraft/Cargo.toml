@@ -6,7 +6,13 @@ edition = "2021"
 [dependencies]
 ganglion-core = { path = "../ganglion-core" }
 ganglion-storage = { path = "../ganglion-storage" }
+openraft = { version = "0.8", optional = true, default-features = false, features = ["serde"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 ganglion-coordination = { path = "../ganglion-coordination" }
 proptest = "1"
+
+[features]
+default = []
+openraft = ["dep:openraft", "dep:tokio"]
