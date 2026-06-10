@@ -17,6 +17,7 @@ pub enum OpenraftAdapterError {
     PoisonedState,
     StaleTerm,
     Planner(PlacementError),
+    Config(String),
     Storage(String),
 }
 
@@ -29,6 +30,7 @@ impl fmt::Display for OpenraftAdapterError {
             }
             Self::PoisonedState => f.write_str("consensus state lock was poisoned"),
             Self::StaleTerm => f.write_str("proposal term is older than current leader term"),
+            Self::Config(error) => write!(f, "configuration error: {error}"),
             Self::Planner(error) => write!(f, "planner error: {:?}", error),
             Self::Storage(error) => write!(f, "storage error: {error}"),
         }
@@ -38,6 +40,106 @@ impl fmt::Display for OpenraftAdapterError {
 impl From<MetadataLogError> for OpenraftAdapterError {
     fn from(error: MetadataLogError) -> Self {
         Self::Storage(error.to_string())
+    }
+}
+
+/// Configurable startup replay profile for persisted metadata recovery.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PersistedMetadataReplayProfile {
+    /// Reject malformed/non-sequential tails during startup.
+    Strict,
+    /// Allow a bounded tail of malformed lines before startup continues.
+    Default,
+    /// Use an explicit bounded-tail threshold during startup recovery.
+    TruncateTail { max_tail_lines: usize },
+}
+
+impl PersistedMetadataReplayProfile {
+    const DEFAULT_TAIL_REPLAY_LIMIT: usize = 1;
+    const ENV_REPLAY_PROFILE: &'static str = "GANGLION_PERSISTED_REPLAY_PROFILE";
+
+    pub fn env_var_name() -> &'static str {
+        Self::ENV_REPLAY_PROFILE
+    }
+
+    pub const fn to_replay_policy(self) -> FileMetadataReplayPolicy {
+        match self {
+            Self::Strict => FileMetadataReplayPolicy::Strict,
+            Self::Default => FileMetadataReplayPolicy::TruncateTail {
+                max_tail_lines: Self::DEFAULT_TAIL_REPLAY_LIMIT,
+            },
+            Self::TruncateTail { max_tail_lines } => {
+                FileMetadataReplayPolicy::TruncateTail { max_tail_lines }
+            }
+        }
+    }
+
+    pub const fn from_replay_policy(policy: FileMetadataReplayPolicy) -> Self {
+        match policy {
+            FileMetadataReplayPolicy::Strict => Self::Strict,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines } => {
+                if max_tail_lines == Self::DEFAULT_TAIL_REPLAY_LIMIT {
+                    Self::Default
+                } else {
+                    Self::TruncateTail { max_tail_lines }
+                }
+            }
+        }
+    }
+
+    pub fn from_env_var() -> Result<Self, OpenraftAdapterError> {
+        match std::env::var(Self::ENV_REPLAY_PROFILE) {
+            Ok(raw) => raw.parse::<Self>(),
+            Err(std::env::VarError::NotPresent) => Ok(Self::Default),
+            Err(error) => Err(OpenraftAdapterError::Config(format!(
+                "failed to read {}: {error}",
+                Self::ENV_REPLAY_PROFILE
+            ))),
+        }
+    }
+}
+
+impl std::str::FromStr for PersistedMetadataReplayProfile {
+    type Err = OpenraftAdapterError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let normalized = raw.trim().to_ascii_lowercase();
+
+        if normalized.is_empty() || normalized == "default" {
+            return Ok(Self::Default);
+        }
+
+        if normalized == "strict" {
+            return Ok(Self::Strict);
+        }
+
+        if normalized == "resilient" {
+            return Ok(Self::Default);
+        }
+
+        let parse_tail_limit = |suffix: &str| -> Result<Self, OpenraftAdapterError> {
+            let max_tail_lines = suffix.parse::<usize>().map_err(|error| {
+                OpenraftAdapterError::Config(format!("invalid tail limit `{suffix}`: {error}"))
+            })?;
+            Ok(Self::TruncateTail { max_tail_lines })
+        };
+
+        if let Some(suffix) = normalized.strip_prefix("truncate_tail:") {
+            return parse_tail_limit(suffix);
+        }
+
+        if let Some(suffix) = normalized.strip_prefix("tail:") {
+            return parse_tail_limit(suffix);
+        }
+
+        normalized
+            .parse::<usize>()
+            .map(|max_tail_lines| Self::TruncateTail { max_tail_lines })
+            .map_err(|error| {
+                OpenraftAdapterError::Config(format!(
+                    "invalid persisted replay profile `{raw}`: {error}"
+                ))
+            })
     }
 }
 
@@ -356,23 +458,20 @@ impl MetadataConsensus for InMemoryMetadataNode {
 #[derive(Debug)]
 pub struct PersistedMetadataNode {
     inner: MetadataNode,
+    startup_replay_profile: PersistedMetadataReplayProfile,
 }
 
 impl PersistedMetadataNode {
-    const DEFAULT_TAIL_REPLAY_LIMIT: usize = 1;
-
     pub fn new<P: Into<std::path::PathBuf>>(
         path: P,
         node_id: impl Into<String>,
         initial_snapshot: CoordinationSnapshot,
     ) -> Result<Self, OpenraftAdapterError> {
-        Self::new_with_replay_policy(
+        Self::new_with_replay_profile(
             path,
             node_id,
             initial_snapshot,
-            FileMetadataReplayPolicy::TruncateTail {
-                max_tail_lines: Self::DEFAULT_TAIL_REPLAY_LIMIT,
-            },
+            PersistedMetadataReplayProfile::Default,
         )
     }
 
@@ -381,11 +480,25 @@ impl PersistedMetadataNode {
         node_id: impl Into<String>,
         initial_snapshot: CoordinationSnapshot,
     ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_replay_profile(
+            path,
+            node_id,
+            initial_snapshot,
+            PersistedMetadataReplayProfile::Strict,
+        )
+    }
+
+    pub fn new_with_replay_profile<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+        replay_profile: PersistedMetadataReplayProfile,
+    ) -> Result<Self, OpenraftAdapterError> {
         Self::new_with_replay_policy(
             path,
             node_id,
             initial_snapshot,
-            FileMetadataReplayPolicy::Strict,
+            replay_profile.to_replay_policy(),
         )
     }
 
@@ -395,12 +508,29 @@ impl PersistedMetadataNode {
         initial_snapshot: CoordinationSnapshot,
         max_tail_lines: usize,
     ) -> Result<Self, OpenraftAdapterError> {
-        Self::new_with_replay_policy(
+        Self::new_with_replay_profile(
             path,
             node_id,
             initial_snapshot,
-            FileMetadataReplayPolicy::TruncateTail { max_tail_lines },
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines },
         )
+    }
+
+    pub fn new_with_profile_env<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+    ) -> Result<Self, OpenraftAdapterError> {
+        let replay_profile = PersistedMetadataReplayProfile::from_env_var()?;
+        Self::new_with_replay_profile(path, node_id, initial_snapshot, replay_profile)
+    }
+
+    pub fn new_from_env<P: Into<std::path::PathBuf>>(
+        path: P,
+        node_id: impl Into<String>,
+        initial_snapshot: CoordinationSnapshot,
+    ) -> Result<Self, OpenraftAdapterError> {
+        Self::new_with_profile_env(path, node_id, initial_snapshot)
     }
 
     pub fn new_with_replay_policy<P: Into<std::path::PathBuf>>(
@@ -410,14 +540,26 @@ impl PersistedMetadataNode {
         replay_policy: FileMetadataReplayPolicy,
     ) -> Result<Self, OpenraftAdapterError> {
         let path = path.into();
-        let log = match replay_policy {
+        let replay_profile = PersistedMetadataReplayProfile::from_replay_policy(replay_policy);
+        let log = match replay_profile.to_replay_policy() {
             FileMetadataReplayPolicy::Strict => Box::new(FileMetadataLog::new(path)),
             FileMetadataReplayPolicy::TruncateTail { .. } => {
                 Box::new(FileMetadataLog::with_replay_policy(path, replay_policy))
             }
         };
         let inner = MetadataNode::new(node_id, initial_snapshot, log)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            startup_replay_profile: replay_profile,
+        })
+    }
+
+    pub fn startup_replay_profile(&self) -> PersistedMetadataReplayProfile {
+        self.startup_replay_profile
+    }
+
+    pub fn startup_replay_policy(&self) -> FileMetadataReplayPolicy {
+        self.startup_replay_profile.to_replay_policy()
     }
 
     pub fn set_leader_term(&self, node_id: impl Into<String>, term: u64) {
@@ -516,7 +658,31 @@ mod tests {
     use std::env;
     use std::fs;
     use std::rc::Rc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn decorate_profile_input(
+        raw: &str,
+        leading_whitespace: usize,
+        trailing_whitespace: usize,
+        uppercase: bool,
+    ) -> String {
+        let mut text = String::with_capacity(raw.len() + leading_whitespace + trailing_whitespace);
+        text.push_str(&" ".repeat(leading_whitespace));
+        text.push_str(raw);
+        text.push_str(&" ".repeat(trailing_whitespace));
+        if uppercase {
+            text.to_ascii_uppercase()
+        } else {
+            text
+        }
+    }
+
+    static ENV_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn with_env_lock() -> MutexGuard<'static, ()> {
+        ENV_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn unique_temp_path(tag: &str) -> std::path::PathBuf {
         let mut path = env::temp_dir();
@@ -531,6 +697,111 @@ mod tests {
         path
     }
 
+    fn valid_replay_profile_inputs(
+    ) -> impl proptest::prelude::Strategy<Value = (PersistedMetadataReplayProfile, String)> {
+        prop_oneof![
+            (0u8..4, 0u8..4, prop::bool::ANY).prop_map(
+                |(leading, trailing, uppercase)| (
+                    PersistedMetadataReplayProfile::Default,
+                    decorate_profile_input(
+                        "default",
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+            (0u8..4, 0u8..4, prop::bool::ANY).prop_map(
+                |(leading, trailing, uppercase)| (
+                    PersistedMetadataReplayProfile::Default,
+                    decorate_profile_input(
+                        "resilient",
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+            (0u8..4, 0u8..4, prop::bool::ANY).prop_map(
+                |(leading, trailing, uppercase)| (
+                    PersistedMetadataReplayProfile::Strict,
+                    decorate_profile_input(
+                        "strict",
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+            (0u8..4, 0u8..4, 0..16usize, prop::bool::ANY).prop_map(
+                |(leading, trailing, tail, uppercase)| (
+                    PersistedMetadataReplayProfile::TruncateTail {
+                        max_tail_lines: tail,
+                    },
+                    decorate_profile_input(
+                        &format!("tail:{tail}"),
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+            (0u8..4, 0u8..4, 0..16usize, prop::bool::ANY).prop_map(
+                |(leading, trailing, tail, uppercase)| (
+                    PersistedMetadataReplayProfile::TruncateTail {
+                        max_tail_lines: tail,
+                    },
+                    decorate_profile_input(
+                        &format!("truncate_tail:{tail}"),
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+            (0u8..4, 0u8..4, 0..16usize, prop::bool::ANY).prop_map(
+                |(leading, trailing, tail, uppercase)| (
+                    PersistedMetadataReplayProfile::TruncateTail {
+                        max_tail_lines: tail,
+                    },
+                    decorate_profile_input(
+                        &format!("{tail}"),
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    ),
+                )
+            ),
+        ]
+    }
+
+    fn invalid_replay_profile_inputs() -> impl proptest::prelude::Strategy<Value = String> {
+        prop_oneof![
+            proptest::collection::vec(prop::char::range('a', 'z'), 1..12).prop_map(|chars| {
+                let mut raw: String = chars.into_iter().collect();
+                if matches!(raw.as_str(), "default" | "strict" | "resilient") {
+                    raw.push_str("-bad");
+                }
+                raw
+            }),
+            (
+                0u8..4,
+                0u8..4,
+                prop::bool::ANY,
+                proptest::collection::vec(prop::char::range('a', 'z'), 1..12),
+            )
+                .prop_map(|(leading, trailing, uppercase, chars)| {
+                    let candidate = chars.into_iter().collect::<String>();
+                    decorate_profile_input(
+                        &format!("tail:{candidate}"),
+                        leading as usize,
+                        trailing as usize,
+                        uppercase,
+                    )
+                }),
+        ]
+    }
+
     fn build_default_nodes() -> BTreeMap<String, ganglion_core::NodeInfo> {
         let mut nodes = BTreeMap::new();
         nodes.insert(
@@ -542,6 +813,139 @@ mod tests {
             ganglion_core::NodeInfo::new("node-b", "127.0.0.1:2", None::<String>),
         );
         nodes
+    }
+
+    #[test]
+    fn parse_persisted_replay_profile_values() {
+        assert_eq!(
+            "default"
+                .parse::<PersistedMetadataReplayProfile>()
+                .expect("default profile should parse"),
+            PersistedMetadataReplayProfile::Default
+        );
+        assert_eq!(
+            "".parse::<PersistedMetadataReplayProfile>()
+                .expect("empty profile should resolve to default"),
+            PersistedMetadataReplayProfile::Default
+        );
+        assert_eq!(
+            "resilient"
+                .parse::<PersistedMetadataReplayProfile>()
+                .expect("resilient profile should parse"),
+            PersistedMetadataReplayProfile::Default
+        );
+        assert_eq!(
+            "strict"
+                .parse::<PersistedMetadataReplayProfile>()
+                .expect("strict profile should parse"),
+            PersistedMetadataReplayProfile::Strict
+        );
+        assert_eq!(
+            "tail:3"
+                .parse::<PersistedMetadataReplayProfile>()
+                .expect("explicit tail profile should parse"),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 3 }
+        );
+        assert_eq!(
+            "7".parse::<PersistedMetadataReplayProfile>()
+                .expect("numeric profile should parse"),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 7 }
+        );
+
+        assert!(
+            "bad-profile"
+                .parse::<PersistedMetadataReplayProfile>()
+                .is_err(),
+            "unknown profile should fail"
+        );
+    }
+
+    #[test]
+    fn persisted_node_startup_profile_is_resolved_and_diagnostics_available() {
+        let default_node = PersistedMetadataNode::new(
+            unique_temp_path("profile-default"),
+            "node-a",
+            CoordinationSnapshot::default(),
+        )
+        .expect("default constructor should build");
+        assert_eq!(
+            default_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Default,
+            "default constructor should record default profile"
+        );
+        assert_eq!(
+            default_node.startup_replay_policy(),
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+            "profile diagnostics should expose replay policy"
+        );
+
+        let strict_node = PersistedMetadataNode::new_strict(
+            unique_temp_path("profile-strict"),
+            "node-a",
+            CoordinationSnapshot::default(),
+        )
+        .expect("strict constructor should build");
+        assert_eq!(
+            strict_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        let custom_node = PersistedMetadataNode::new_with_replay_profile(
+            unique_temp_path("profile-custom"),
+            "node-a",
+            CoordinationSnapshot::default(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 4 },
+        )
+        .expect("custom profile should build");
+        assert_eq!(
+            custom_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 4 }
+        );
+    }
+
+    #[test]
+    fn persisted_node_respects_replay_profile_env_var() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let node = PersistedMetadataNode::new_from_env(
+            unique_temp_path("profile-env"),
+            "node-a",
+            CoordinationSnapshot::default(),
+        )
+        .expect("env-driven constructor should build");
+        assert_eq!(
+            node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Strict
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
+    }
+
+    #[test]
+    fn persisted_node_replay_profile_rejects_invalid_env_value() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "tail:not-a-number");
+
+        let err = PersistedMetadataNode::new_from_env(
+            unique_temp_path("profile-env-invalid"),
+            "node-a",
+            CoordinationSnapshot::default(),
+        )
+        .expect_err("invalid env profile should fail");
+        assert!(matches!(err, OpenraftAdapterError::Config(_)));
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
     }
 
     #[test]
@@ -1080,6 +1484,46 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn fuzz_persisted_replay_profile_parsing_and_mapping(
+            (expected_profile, raw_profile) in valid_replay_profile_inputs()
+        ) {
+            let parsed = raw_profile
+                .parse::<PersistedMetadataReplayProfile>()
+                .expect("generated profile string should parse");
+
+            prop_assert_eq!(parsed, expected_profile);
+
+            let node = PersistedMetadataNode::new_with_replay_profile(
+                unique_temp_path("fuzz-profile-constructor"),
+                "node-a",
+                CoordinationSnapshot::default(),
+                parsed,
+            )
+            .expect("constructor should succeed for parsed profile");
+
+            let startup_policy = node.startup_replay_policy();
+            let startup_profile =
+                PersistedMetadataReplayProfile::from_replay_policy(startup_policy);
+
+            prop_assert_eq!(startup_profile.to_replay_policy(), parsed.to_replay_policy());
+            prop_assert_eq!(
+                startup_profile,
+                PersistedMetadataReplayProfile::from_replay_policy(expected_profile.to_replay_policy())
+            );
+        }
+
+        #[test]
+        fn fuzz_replay_profile_parsing_rejects_invalid_inputs(
+            invalid_profile in invalid_replay_profile_inputs()
+        ) {
+            prop_assert!(
+                invalid_profile
+                    .parse::<PersistedMetadataReplayProfile>()
+                    .is_err()
+            );
+        }
+
         #[test]
     fn fuzz_control_loop_publishing_and_rejection_matrix(
         base_term in 1u64..6,

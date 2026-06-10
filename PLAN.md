@@ -483,6 +483,100 @@ Route persisted startup semantics to resilience-first defaults while keeping str
 2. Add snapshot compaction/migration and durable retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
 
+## Plan Snapshot v14
+
+### Goal
+
+Add fuzz-backed and diagnostic confidence for persisted startup profile behavior, then keep the next recovery/consensus work moving.
+
+### Completed in this snapshot
+
+- `ganglion-openraft`:
+  - Added proptest fuzzing for replay profile parsing:
+    - valid forms (`default`, `resilient`, `strict`, padded/upper-case, `tail:n`, `truncate_tail:n`, numeric `n`)
+    - invalid inputs that must fail.
+  - Added profile/constructor property assertions that validate:
+    - parsed profile maps back to expected replay policy,
+    - startup profile diagnostics are consistent with constructor selection.
+  - Added env-var validation for invalid `GANGLION_PERSISTED_REPLAY_PROFILE` values.
+- Validation:
+  - Kept one-shot validation summary behavior and ensured replay profile details are preserved in test artifacts.
+- Documentation:
+  - Appended this snapshot to `WORKLOG.md` and `PLAN.md` without rewriting earlier entries.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational robustness
+
+1. Add persisted recovery fuzz cases for mixed good/bad tails around corruption depth boundaries.
+2. Add a structured replay-profile source of truth for adapters that use env/config precedence chains.
+3. Add persisted startup constructor smoke tests to every release-like validation path.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+2. Expose committed-snapshot event plumbing for controller observers.
+3. Expand partition/failover sequence coverage with scripted fallback executions.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
+## Plan Snapshot v13
+
+### Goal
+
+Make persisted startup policy pluggable through explicit profiles and surface startup diagnostics in one-shot validation output.
+
+### Completed in this snapshot
+
+- `PersistedMetadataReplayProfile` added in `ganglion-openraft` with `FromStr` support and env integration.
+- Added constructors:
+  - `PersistedMetadataNode::new_with_replay_profile(...)`
+  - `PersistedMetadataNode::new_from_env(...)`
+- Added startup diagnostics on `PersistedMetadataNode`:
+  - `startup_replay_profile()`
+  - `startup_replay_policy()`
+- Validation: `scripts/validate.sh` now writes a `validate-summary.json` artifact containing:
+  - selected `--skip-*` behavior,
+  - jepsen artifact directory,
+  - resolved persisted replay profile metadata from `GANGLION_PERSISTED_REPLAY_PROFILE`.
+- Tests:
+  - added parsing tests for replay profile strings and defaults,
+  - added constructor-level profile diagnostics tests.
+- Documentation:
+  - updated `API.md` and `tests/jepsen/README.md` for profile parsing, env var, and summary output.
+
+### Short-Term Roadmap
+
+#### Resolution target: resilience and operator control
+
+1. Extend validation diagnostics to include actual resolved startup policy for persisted adapters per run.
+2. Add a small fuzz target for profile parsing and mixed startup constructor coverage.
+3. Keep strict-mode APIs explicit and visible in adapter factories.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Expose committed-snapshot events with optional watchers or event sinks.
+3. Expand Jepsen fallback sequence coverage for restart/recovery and leader contention.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
 ## Plan Snapshot v12
 
 ### Goal

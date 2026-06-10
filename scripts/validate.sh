@@ -8,6 +8,12 @@ RUN_TESTS=true
 RUN_PROPT=true
 RUN_JEPSEN=true
 
+PERSISTED_REPLAY_PROFILE_ENV="GANGLION_PERSISTED_REPLAY_PROFILE"
+SUMMARY_FMT="skipped"
+SUMMARY_TESTS="skipped"
+SUMMARY_PROPT="skipped"
+SUMMARY_JEPSEN="skipped"
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -20,6 +26,15 @@ Options:
   --skip-jepsen           skip tests/jepsen/run.sh all
   --jepsen-artifact-dir P artifacts directory for jepsen scenario logs
   -h, --help             show this help
+  
+Environment:
+  GANGLION_PERSISTED_REPLAY_PROFILE
+    - default
+    - strict
+    - resilient
+    - tail:<n>
+    - truncate_tail:<n>
+    - <n>
 EOF
 }
 
@@ -64,22 +79,67 @@ done
 run_fmt() {
   echo "validate: cargo fmt --all --check"
   cargo fmt --all --check
+  SUMMARY_FMT="pass"
 }
 
 run_tests() {
   echo "validate: cargo test --workspace --quiet"
   cargo test --workspace --quiet
+  SUMMARY_TESTS="pass"
 }
 
 run_proptest() {
   echo "validate: scripts/proptest.sh run"
   bash "$ROOT_DIR/scripts/proptest.sh" run
+  SUMMARY_PROPT="pass"
 }
 
 run_jepsen() {
   mkdir -p "$JEPSEN_ARTIFACT_DIR"
   echo "validate: tests/jepsen/run.sh all --artifact-dir $JEPSEN_ARTIFACT_DIR"
   bash "$ROOT_DIR/tests/jepsen/run.sh" all --artifact-dir "$JEPSEN_ARTIFACT_DIR"
+  SUMMARY_JEPSEN="pass"
+}
+
+write_summary() {
+  local summary_file="$JEPSEN_ARTIFACT_DIR/validate-summary.json"
+  local replay_profile_raw="${GANGLION_PERSISTED_REPLAY_PROFILE:-<unset>}"
+  local replay_profile_effective="$replay_profile_raw"
+  if [[ "$replay_profile_effective" == "<unset>" ]]; then
+    replay_profile_effective="default"
+  fi
+
+  cat <<EOF > "$summary_file"
+{
+  "script": "scripts/validate.sh",
+  "workspace": "$ROOT_DIR",
+  "jepsen_artifact_dir": "$JEPSEN_ARTIFACT_DIR",
+  "replay_profile": {
+    "env_var": "$PERSISTED_REPLAY_PROFILE_ENV",
+    "value": "$replay_profile_raw",
+    "effective": "$replay_profile_effective"
+  },
+  "runs": {
+    "fmt": {
+      "requested": $RUN_FMT,
+      "result": "$SUMMARY_FMT"
+    },
+    "tests": {
+      "requested": $RUN_TESTS,
+      "result": "$SUMMARY_TESTS"
+    },
+    "proptest": {
+      "requested": $RUN_PROPT,
+      "result": "$SUMMARY_PROPT"
+    },
+    "jepsen": {
+      "requested": $RUN_JEPSEN,
+      "result": "$SUMMARY_JEPSEN"
+    }
+  }
+}
+EOF
+  echo "validate: wrote summary to $summary_file"
 }
 
 if [[ "$RUN_FMT" == true ]]; then
@@ -97,5 +157,8 @@ fi
 if [[ "$RUN_JEPSEN" == true ]]; then
   run_jepsen
 fi
+
+mkdir -p "$JEPSEN_ARTIFACT_DIR"
+write_summary
 
 echo "validate: completed"

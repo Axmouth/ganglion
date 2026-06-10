@@ -20,6 +20,7 @@ Use:
 - `tests/jepsen/run.sh scenario baseline-failover`
 - `scripts/jepsen.sh all` (CI-targetable wrapper).
 - `scripts/validate.sh` (runs fmt, tests, proptests, and all Jepsen scenarios).
+  It writes `validate-summary.json` under the chosen artifact directory with run and replay-profile metadata.
 
 `scripts/validate.sh` is the preferred one-shot local/CI validation path.  
 It accepts:
@@ -28,6 +29,9 @@ It accepts:
 - `--skip-fuzz`
 - `--skip-jepsen`
 - `--jepsen-artifact-dir <path>`
+
+Environment variable:
+- `GANGLION_PERSISTED_REPLAY_PROFILE` (resolved default is `default`).
 
 If Clojure/Jepsen is not available in the environment, scenario scripts will emit
 `SKIPPED` and still write a log file so orchestration can continue.

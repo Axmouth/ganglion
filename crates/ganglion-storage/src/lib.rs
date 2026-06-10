@@ -115,7 +115,7 @@ pub trait MetadataLog: Send + Sync + fmt::Debug {
 }
 
 /// Replay policy for file-backed metadata logs.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum FileMetadataReplayPolicy {
     /// Fail hard on malformed or non-sequential records.
     Strict,

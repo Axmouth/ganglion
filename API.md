@@ -80,6 +80,17 @@ This file tracks what each part of the current scaffolding is meant to do.
 - `PersistedMetadataNode::new` now uses bounded-tail replay by default.
 - `PersistedMetadataNode::new_strict` preserves strict validation on startup.
 - `PersistedMetadataNode::new_with_tail_replay_limit` sets explicit tolerated tail limit for startup.
+- `PersistedMetadataNode::new_with_replay_profile` selects startup behavior from a replay profile:
+  - `Strict`
+  - `Default` (`TruncateTail` with one line tolerance)
+  - `TruncateTail { max_tail_lines }`
+- `PersistedMetadataNode::new_from_env` reads `GANGLION_PERSISTED_REPLAY_PROFILE` when available.
+- `PersistedMetadataNode::startup_replay_profile` and `startup_replay_policy` expose the resolved startup choice.
+- `PersistedMetadataReplayProfile` can also be parsed from strings such as:
+  - `strict`
+  - `default` / `resilient`
+  - `tail:<n>` / `truncate_tail:<n>` / `<n>`.
+- `OpenraftAdapterError::Config` reports invalid profile parsing/lookup failures.
 
 - `OpenraftAdapterError::Storage`
   - New variant for storage failures from durability backends.

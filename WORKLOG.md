@@ -372,3 +372,75 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Add planner strategy registry with parameterized policies.
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v13 execution pass completed
+
+- `ganglion-openraft`:
+  - Added `PersistedMetadataReplayProfile` with:
+    - strict/resilient defaults,
+    - bounded-tail override via `truncate_tail:<n>` or `<n>`,
+    - config parsing using `FromStr`.
+  - Added startup profile constructors:
+    - `new_with_replay_profile(...)`
+    - `new_from_env(...)` (reads `GANGLION_PERSISTED_REPLAY_PROFILE`).
+  - Added startup diagnostics on `PersistedMetadataNode`:
+    - `startup_replay_profile()`
+    - `startup_replay_policy()`
+  - Added tests:
+    - profile parsing coverage for default/strict/tail forms and invalid values,
+    - constructor coverage confirming stored startup diagnostics for default/strict/custom selections.
+
+- Validation tooling:
+  - Updated `scripts/validate.sh` to emit `tests/jepsen/artifacts/validate-run/validate-summary.json`.
+  - Summary now records:
+    - requested/skipped run phases,
+    - artifact directory,
+    - replay profile env value/effective output.
+
+- Documentation:
+  - Updated `API.md` for replay-profile constructors/diagnostics.
+  - Updated `tests/jepsen/README.md` with replay-profile env guidance and summary artifact location.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add a dedicated fuzz target for profile parsing and constructor-selection behavior.
+  2. Keep validation summaries in CI artifacts and verify profile-resolution evidence on every run.
+  3. Improve config ergonomics for profile expressions and error messages.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+  2. Introduce committed-snapshot publication plumbing for external controllers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Expand backend adapters and migration plans beyond basic file logs.
+
+## v14 execution pass completed
+
+- `ganglion-openraft`:
+  - Added property tests that fuzz replay profile parsing and constructor mapping for valid and invalid profile inputs.
+  - Added a targeted env-var failure test that verifies invalid `GANGLION_PERSISTED_REPLAY_PROFILE` values produce `OpenraftAdapterError::Config`.
+  - Expanded existing startup-profile coverage with constructor-level assertions that confirm reconstructed startup policy matches parsed intent.
+
+- Validation and harness:
+  - Kept `scripts/validate.sh` as the one-shot path for fmt/tests/proptest/jepsen.
+  - Confirmed `validate-summary.json` already includes replay profile env/effective values and run-level request/result flags.
+
+- Tooling:
+  - No additional `.gitignore` adjustments were needed in this pass.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Add a dedicated persisted recovery harness that asserts bounded-tail tolerance around corrupt logs under high tail depth variance.
+  2. Add Jepsen-driven restart/failover scenario replay and keep artifacts in `tests/jepsen/artifacts`.
+  3. Add constructor/diagnostic smoke checks for every persisted startup entrypoint in CI scripts.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same consensus contracts.
+  2. Introduce committed-snapshot publication plumbing for external controllers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and compaction tooling for replay logs.
+  3. Expand backend adapters and migration plans beyond basic file logs.
