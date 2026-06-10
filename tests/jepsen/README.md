@@ -1,18 +1,35 @@
 # Jepsen Scenarios for Ganglion
 
-This directory is a starter scaffold for the future Jepsen harness.
-Keep it aligned with `JEPSEN_PLAN.md` and the final openraft transport implementation.
+This directory holds the runnable Jepsen harness surface for this repo.
+Scenario scripts are commandable and produce logs under `tests/jepsen/artifacts`.
 
-## Intended layout
+## Layout
 
 - `README.md` (this file): scenario intent and mapping to expected checks.
-- `scenarios/`: declarative scenario definitions (rebalancing, failover, partitions).
+- `run.sh`: CLI entrypoint to list scenarios or run one/all.
+- `scenarios/`: runnable shell wrappers for Jepsen scenario definitions.
 - `artifacts/`: captured run logs and CI summaries.
+- `scripts/` (repo root): `scripts/jepsen.sh` is the CI-friendly entrypoint.
 
-## Next concrete step
+## Running
 
-- Add a small orchestration runner (likely Clojure) that can:
-  - boot a 3-node metadata cluster,
-  - inject partition/fail/restart,
-  - assert leader-election and snapshot monotonicity invariants,
-  - emit artifacts to `artifacts/`.
+Use:
+
+- `tests/jepsen/run.sh list`
+- `tests/jepsen/run.sh all`
+- `tests/jepsen/run.sh scenario baseline-failover`
+- `scripts/jepsen.sh all` (CI-targetable wrapper).
+
+If Clojure/Jepsen is not available in the environment, scenario scripts will emit
+`SKIPPED` and still write a log file so orchestration can continue.
+
+## Scenario inventory
+
+- `01-baseline-failover.sh`
+- `02-partition-split-brain.sh`
+- `03-crash-recovery.sh`
+
+## Current status
+
+- Scenario orchestration is available with a local fallback that runs focused Rust smoke checks when a Jepsen/Clojure runtime is unavailable.
+- Placeholder harness hooks remain for future direct Jepsen wiring.

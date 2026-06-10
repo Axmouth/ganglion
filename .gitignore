@@ -22,6 +22,10 @@ coverage/
 **/fuzz/
 **/fuzz-artifacts/
 **/proptest-regressions/
+!crates/ganglion-core/proptest-regressions/
+!crates/ganglion-openraft/proptest-regressions/
+!crates/ganglion-core/proptest-regressions/**
+!crates/ganglion-openraft/proptest-regressions/**
 
 # Tooling / IDE
 .idea/

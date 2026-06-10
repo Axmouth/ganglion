@@ -4,4 +4,5 @@ members = [
     "crates/ganglion-core",
     "crates/ganglion-openraft",
     "crates/ganglion-coordination",
+    "crates/ganglion-storage",
 ]

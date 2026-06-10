@@ -73,10 +73,29 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Runs a planner and consensus apply, then publishes the committed snapshot through a callback.
   - Useful for control-plane loops where observers consume assignment updates from the same node.
 
+- `PersistedMetadataNode`
+  - File-backed consensus adapter using durable logs from `ganglion-storage`.
+  - Restores current term and latest committed snapshot from disk during construction.
+  - Supports replayable term/retry behavior for restart flows.
+
+- `OpenraftAdapterError::Storage`
+  - New variant for storage failures from durability backends.
+
+## Storage crate (`ganglion-storage`)
+
+- `MetadataLog`
+  - Persistence abstraction for append entries and replay semantics.
+- `InMemoryMetadataLog`
+  - In-memory implementation used by tests.
+- `FileMetadataLog`
+  - Append-only file-backed log that writes newline-delimited JSON entries.
+  - Replay performs strict index validation and returns storage parse errors on malformed/corrupt payloads.
+- `MetadataLogEntry`
+  - Term/index/snapshot records stored by durable implementations.
+
 ## Planned next part
 
 - `ganglion-openraft` full Raft engine integration to replace current in-memory placeholder.
-- Optional storage adapter crate (`ganglion-keratin`), wired behind storage traits.
 - Optional transport/watch layer for snapshot notifications and controller handoff loops.
 
 ## Coordination crate (`ganglion-coordination`)

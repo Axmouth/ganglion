@@ -63,6 +63,11 @@ It is a roadmap artifact, not a time-based log.
   - result collection checklist.
 - Integration into CI behind a separate workflow/job that runs when openraft adapter is replaced.
 
+### Fallback execution (current)
+
+- Scenario scripts in `tests/jepsen/scenarios/` now run focused `ganglion-openraft` Rust checks when Jepsen/Clojure is unavailable.
+- This keeps invariant coverage active in non-Clojure environments while keeping the future Jepsen hook in place.
+
 ## Exit checks
 
 - No test should treat “new follower start” as a no-op publish path.

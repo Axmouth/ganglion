@@ -171,3 +171,106 @@ This file is the detailed history of everything done in this repo, modeled after
 
 - Validation:
   - Updated `PLAN.md` with `Plan Snapshot v7`.
+
+## v8 execution pass completed
+
+- `ganglion-storage` introduced:
+  - Created new crate `ganglion-storage` with:
+    - `MetadataLog` trait,
+    - file-backed and in-memory implementations,
+    - serialized `MetadataLogEntry` format,
+    - helper conversion to preserve `ResourceIdentity` keys safely in durable files.
+  - Added crate to workspace and dependency wiring in `ganglion-openraft`.
+
+- `ganglion-openraft` persistence path:
+  - Reworked internal node plumbing to persist and restore state through `MetadataLog` abstraction.
+  - Added `PersistedMetadataNode`:
+    - recovers latest term and snapshot from file,
+    - supports restart semantics in unit tests.
+  - Added `Storage` variant to `OpenraftAdapterError` with conversion from storage errors.
+  - Fixed nested-result handling in write path so storage and validation errors are now propagated.
+  - Fixed term-vs-generation ordering so stale term checks are enforced with explicit priority.
+  - Added explicit recovery-path tests:
+    - roundtrip replay with term recovery,
+    - stale-term rejection after restart,
+    - term bump log-reset assertion with persisted node.
+
+- Test scaffolding and harnessing:
+  - Added fuzz/proptest utilities:
+    - `scripts/proptest.sh` with crate selection and replay modes,
+    - `.gitignore` updates for regression captures,
+    - dedicated regression directories under `crates/ganglion-* /proptest-regressions`.
+  - Added Jepsen scaffolding:
+    - `scripts/jepsen.sh` forwarding wrapper,
+    - `tests/jepsen/run.sh` runner (list/scenario/all),
+    - baseline/split-brain/crash scenario scripts and runner docs.
+  - Added a regression-style repro test that validates control-loop publish side effects for nontrivial proposer/leader combinations.
+
+- Validation:
+  - Ran formatting: `cargo fmt --all`.
+  - Ran tests:
+    - `cargo test -p ganglion-storage --quiet`,
+    - `cargo test -p ganglion-openraft --quiet`,
+    - `cargo test --quiet` (workspace).
+  - All tests passed after adjustments.
+
+- Documentation:
+  - Appended this pass to `PLAN.md` as `Plan Snapshot v8` with updated short/medium/long roadmaps.
+
+- Notes:
+  - `proptest` regression data generated for openraft fuzzing was retained locally for reproducibility.
+
+## Current roadmap state (no timestamps)
+
+### Short-term
+
+1. Keep persistence adapter interface stable and add additional backends (Keratin + optional memory wrappers).
+2. Finalize recovery and replay behavior under malformed/corrupt log inputs.
+3. Enforce a CI policy that retains proptest regression artifacts for both core and openraft.
+
+### Medium-term
+
+1. Replace the in-memory-like behavior with true openraft transport while preserving `MetadataConsensus`.
+2. Add watcher stream plumbing for external observers and health telemetry.
+3. Expand Jepsen scaffolding into a runnable, automated fault-injection matrix.
+
+### Long-term
+
+1. Add planner strategy registry and strategy-specific defaults.
+2. Add snapshot compaction/migration and historical-log lifecycle tooling.
+3. Promote stable APIs for downstream consumers (fibril and beyond) without queue-specific coupling.
+
+## v9 execution pass completed
+
+- `ganglion-storage` durability hardening:
+  - `FileMetadataLog` now validates replay integrity:
+    - enforces index sequence and non-zero start index,
+    - returns parse failures with line context on invalid JSON,
+    - rejects malformed/non-sequential/zero-index entries deterministically.
+  - Added unit tests for valid replay, comments+blank lines, malformed JSON, index violations.
+- `ganglion-openraft` persisted-node robustness:
+  - Added startup tests for corrupted and non-sequential metadata logs.
+  - Verified those cases map to `OpenraftAdapterError::Storage`.
+- `jepsen` scaffold execution:
+  - Updated scenario scripts to run concrete smoke checks via existing Rust tests when Clojure is absent.
+  - This gives reproducible local fallback behavior per scenario while keeping the Jepsen hook placeholder in place.
+- Documentation cleanup:
+  - Updated proptest regression fixture headers to neutral, in-repo language.
+- Validation:
+  - `cargo fmt --all`
+  - `cargo test --quiet`
+
+## Current roadmap update (no timestamps)
+
+- Short-term:
+  1. Add bounded recovery policy for partially corrupted logs.
+  2. Add CI-preserved proptest artifact upload for core and openraft fuzz outputs.
+  3. Add a lightweight sequence replay harness for Jepsen-like workflows without Clojure.
+- Medium-term:
+  1. Replace in-memory-like consensus path with true openraft transport.
+  2. Add committed-snapshot event publishing and health telemetry.
+  3. Expand cluster-level failover and partition integration tests.
+- Long-term:
+  1. Add planner strategy registry and parameterized policy registry.
+  2. Add durable snapshot compaction and migration APIs.
+  3. Support multiple backend adapters (`ganglion-storage` alternatives) behind a single contract.

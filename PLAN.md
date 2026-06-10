@@ -279,3 +279,106 @@ Increase confidence breadth before moving to real transport/storage and keep tes
 1. Add persistent proptest regression capture and replay tooling (`proptest-regressions/` conventions in CI).
 2. Materialize the Jepsen scaffold directory with commandable scenarios and a CI gateable target.
 3. Implement the Keratin-backed persistence adapter and run the same fuzz/control-loop suites through it.
+
+## Plan Snapshot v8
+
+### Goal
+
+Stabilize the persistence + testing substrate so `ganglion` has a recoverable, pluggable metadata plane before replacing the in-memory adapter.
+
+### Completed in this snapshot
+
+- Added `ganglion-storage` crate and wired it into workspace and `ganglion-openraft`.
+- Added two persistence implementations:
+  - `InMemoryMetadataLog` for tests and non-durable mode.
+  - `FileMetadataLog` for append-only, newline-delimited JSON replay files.
+- Added storage schema conversion for `CoordinationSnapshot` that preserves `ResourceIdentity` keys in a durable, deterministic form.
+- Added `PersistedMetadataNode` as a persistence-backed constructor around the same consensus surface:
+  - restores `current_term` from file,
+  - restores latest snapshot,
+  - validates recovery path through replay tests.
+- Added `Storage` error plumbing in openraft adapter:
+  - `OpenraftAdapterError::Storage(String)`,
+  - conversion from `MetadataLogError`,
+  - storage-backed tests for restart + stale write cases.
+- Expanded and stabilized test harnesses:
+  - `scripts/proptest.sh` now supports `list`, `run`, and per-crate replay workflows and regression directories.
+  - `scripts/jepsen.sh` forwards to scenario runner.
+  - `tests/jepsen/run.sh` supports `list`, `all`, and single scenario invocation.
+  - `tests/jepsen/scenarios/*.sh` created for baseline/failover, split-brain, and crash/recovery.
+- Cleaned `proptest` callback capture logic in openraft fuzz tests to ensure success-path publication assertions are checking the same witness.
+- Validated end-to-end by running `cargo test --quiet` successfully for storage, openraft, and workspace crates.
+
+### Short-Term Roadmap
+
+#### Resolution target: persistence confidence on a single-node plane
+
+1. Keep persistence adapter interfaces stable while we wire in additional backends:
+   - file append log,
+   - Keratin append-only segment backend,
+   - optional in-memory/ephemeral mode.
+2. Consolidate recovery and corruption behavior:
+   - explicit malformed-log error handling,
+   - bounded replay windows for startup tests.
+3. Promote proptest regression artifacts to CI-preserved, reviewable fixtures.
+
+### Medium-Term Roadmap
+
+#### Resolution target: consensus transport and observability integration
+
+1. Add true openraft integration behind `MetadataConsensus` while preserving current method contracts.
+2. Attach a watcher/event stream for committed snapshot publication and node health state.
+3. Add a cluster-level control-plane smoke path with leader transfer and partition simulation.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability and ergonomics
+
+1. Provide backend-neutral planner policy registry with strategy names and parameterized options.
+2. Add richer snapshot compaction and migration hooks before large historical logs.
+3. Publish reusable Jepsen execution package for consensus and failover validation.
+
+## Plan Snapshot v9
+
+### Goal
+
+Make durable recovery behavior deterministic under malformed logs and make fault-injection entrypoints executable today.
+
+### Completed in this snapshot
+
+- Hardened `FileMetadataLog` replay validation:
+  - explicit non-sequential index checks (`1,2,3...`),
+  - zero-index rejection,
+  - parse-context on malformed JSON lines.
+- Added `ganglion-storage` file-log tests:
+  - round-trip append/reload,
+  - comments/blank lines support,
+  - malformed JSON rejection,
+  - non-sequential index and zero-index rejections.
+- Added `ganglion-openraft` persisted-node tests for startup against corrupted and non-sequential logs.
+- Updated Jepsen scenario scripts to run focused local Rust smoke checks as a fallback when Jepsen/Clojure is unavailable.
+- Updated regression fixture header comments to neutral, repo-internal wording.
+
+### Short-term Roadmap
+
+#### Resolution target: deterministic recovery and actionable failure-injection gates
+
+1. Define and test a bounded replay policy for partially corrupted logs.
+2. Add CI-native artifact preservation for `proptest-regressions` outputs.
+3. Add a minimal wrapper for replaying known Jepsen-like sequences without Clojure dependency.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus behavior with real openraft transport.
+2. Add event/stream publication API for committed snapshots.
+3. Introduce cluster-level role transfer and partition recovery scenarios.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Provide planner strategy registry with parameterized pluggable policies.
+2. Add snapshot compaction and migration utilities around durable logs.
+3. Expand backend adapters (Keratin + optional external stores) with stable trait compatibility.

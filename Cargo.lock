@@ -97,7 +97,17 @@ version = "0.1.0"
 dependencies = [
  "ganglion-coordination",
  "ganglion-core",
+ "ganglion-storage",
  "proptest",
+]
+
+[[package]]
+name = "ganglion-storage"
+version = "0.1.0"
+dependencies = [
+ "ganglion-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

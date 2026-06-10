@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ganglion-core = { path = "../ganglion-core" }
+ganglion-storage = { path = "../ganglion-storage" }
 
 [dev-dependencies]
 ganglion-coordination = { path = "../ganglion-coordination" }
