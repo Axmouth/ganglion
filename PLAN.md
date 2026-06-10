@@ -1071,6 +1071,53 @@ Make the validation hang cause explicit and keep triage procedure stable for fut
 2. Add retention/compaction tooling for durable metadata logs.
 3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
 
+## Plan Snapshot v27
+
+### Goal
+
+Make scenario aggregates and validation artifacts self-consistent, and fail validation clearly on aggregate scenario failures.
+
+### Completed in this snapshot
+
+- `tests/jepsen/run.sh`:
+  - scenario summaries now record `failed_scenarios` from the actual scenario exit status in `run_scenario` outputs.
+  - `run all` aggregates include stable zero defaults for empty runs and no longer force failure counts to zero.
+- `scripts/validate.sh`:
+  - Jepsen artifact verification now checks:
+    - `scenario_count` matches the number of scenario entries,
+    - every scenario artifact JSON and log path exist,
+    - aggregate `failed_scenarios` is zero when Jepsen is required.
+- `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+  - extended fallback coverage with:
+    - `persisted_node_rejects_stale_term_after_restart`,
+    - `persisted_node_resets_log_on_term_bump`.
+- Validation direction:
+  - ran one-shot validation with a targeted skip set and verified `run-summary.json`/`validate-summary.json` consistency.
+
+### Short-Term Roadmap
+
+#### Resolution target: artifact-driven gating
+
+1. Keep aggregate summary fields (`scenario_count`, `failed_scenarios`, `<scenario>.json` completeness) as the one-shot gate contract.
+2. Keep persistence parity scenario scoped to explicit restart/failover ordering and startup correctness checks.
+3. Add explicit summary checks for artifact-level provenance when backend profile metadata is available.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport/runtime readiness
+
+1. Replace placeholder consensus transport with true openraft runtime while preserving current control-plane contracts.
+2. Add committed-snapshot publication channels with health telemetry.
+3. Expand persistence scenarios to sequence restart/failover by backend.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Expand `MetadataLog` adapter catalog and policy hooks.
+2. Add retention/compaction tooling for durable metadata history.
+3. Move planner and persistence-profile selection into operator-facing configuration registries.
+
 ## Plan Snapshot v25
 
 ### Goal

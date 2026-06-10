@@ -145,14 +145,19 @@ verify_jepsen_artifacts() {
   fi
 
   local scenario_count
-  local expected_count
   local entry_count
   scenario_count="$(jq -r '.scenario_count // (.scenarios | length)' "$summary_file")"
   entry_count="$(jq -r '.scenarios | length' "$summary_file")"
-  expected_count="$(jq -r '.scenarios | length' "$summary_file")"
+  local failed_count
+  failed_count="$(jq -r '[.scenarios[] | select(.status != "pass")] | length' "$summary_file")"
 
-  if [[ "$scenario_count" != "$expected_count" || "$entry_count" != "$expected_count" ]]; then
+  if [[ "$scenario_count" -ne "$entry_count" ]]; then
     echo "validate: inconsistent scenario-count metadata in $summary_file"
+    return 1
+  fi
+
+  if [[ "$failed_count" -gt 0 && "$RUN_JEPSEN" == "true" ]]; then
+    echo "validate: jepsen run-summary reports failing scenarios in $summary_file"
     return 1
   fi
 

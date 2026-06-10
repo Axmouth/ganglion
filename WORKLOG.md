@@ -847,3 +847,39 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Expand `MetadataLog` adapter catalog and policy hooks.
   2. Add retention/compaction tooling for durable metadata logs.
   3. Move strategy registries (planner and persistence profile) into reusable operator configuration.
+
+## v27 execution pass completed
+
+- `tests/jepsen/run.sh`:
+  - scenario summaries now report `failed_scenarios` from the scenario process exit code.
+  - `run all` summary output keeps actual aggregate failure totals and handles empty runs predictably.
+- `scripts/validate.sh`:
+  - Jepsen artifact verification now requires:
+    - `scenario_count` equals aggregate scenario entry count,
+    - each scenario has both `.json` and `.log` artifacts,
+    - aggregate `failed_scenarios` is zero for a passing validation run.
+- `tests/jepsen/scenarios/06-persistence-backend-parity.sh`:
+  - added direct restart-focused assertions:
+    - `persisted_node_rejects_stale_term_after_restart`,
+    - `persisted_node_resets_log_on_term_bump`.
+- Validation runs:
+  - `bash scripts/validate.sh --skip-fmt --skip-tests --skip-fuzz --skip-startup-smoke --jepsen-artifact-dir /tmp/jepsen-v27-test`
+  - `tests/jepsen/run.sh all --artifact-dir /tmp/jepsen-v27-all`
+  - `tests/jepsen/run.sh scenario 06-persistence-backend-parity --artifact-dir /tmp/jepsen-v27-scenario`
+- Operational finding carry-forward:
+  - this remains the first-line finding: prior hangs in broader one-shot paths trace to a separate background invocation path, while focused scenario and direct Rust fallback checks remain stable.
+
+## v27 Roadmap update (no timestamps)
+
+- Short-term:
+  1. Make aggregate validation failure and artifact checks terminal in every local and CI path.
+  2. Extend persistence scenario to explicitly assert restart/failover ordering in backend sequencing.
+  3. Keep one-shot validation as the single source of truth by validating `<scenario>.json`, `.log`, and aggregate counts together.
+- Medium-term:
+  1. Replace placeholder consensus transport with true openraft runtime while preserving current interfaces.
+  2. Add committed-snapshot publication channels and durability telemetry.
+  3. Expand persistence and restart scenarios with explicit multi-backend choreography.
+- Long-term:
+  1. Expand `MetadataLog` adapter catalog and policy hooks.
+  2. Add retention/compaction tooling for durable metadata logs.
+  3. Move planner and persistence-profile selection into operator-facing registry surfaces.
