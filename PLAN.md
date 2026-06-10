@@ -838,3 +838,42 @@ Stabilize Keratin persistence integration enough to be usable by the existing pe
 1. Add additional `MetadataLog` adapters for non-file/WAL providers under one interface.
 2. Add compaction, truncation policy hooks, and retention envelopes suitable for production metadata planes.
 3. Expand strategy registries and strategy-specific options for planner defaults and rollout behavior.
+
+## Plan Snapshot v20
+
+### Goal
+
+Confirm storage parity and validation ergonomics for Keratin backends before transport integration deepens.
+
+### Completed in this snapshot
+
+- `ganglion-storage`:
+  - Added Keratin malformed-tail and sequence-boundary parity cases for replay behavior.
+  - Fixed test-level resource handling so reopens of the same Keratin root no longer race with existing handles.
+  - Kept parity with file-log decisions: recoverable only within bounded-tail policy, hard-fail beyond tolerance or strict mode.
+- `ganglion-openraft`:
+  - Re-validated persisted-node surface with injected backend additions still passing.
+
+### Short-Term Roadmap
+
+#### Resolution target: parity confidence
+
+1. Add a one-shot local parity gate that runs file+keratin replay-boundary matrix checks and startup constructor checks together.
+2. Add backend-aware fuzz input coverage for tail-depth and malformed payload boundaries.
+3. Report backend name + resolved replay policy in validation artifacts consistently.
+
+### Medium-Term Roadmap
+
+#### Resolution target: durable transport plane
+
+1. Add scripted restart/failover persistence scenarios covering both storage backends in one path.
+2. Add durability telemetry hooks around append/clear/truncate for adapters.
+3. Continue replacing placeholder consensus transport while preserving persisted startup contracts.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add retention and compaction utilities for metadata log durability.
+2. Expand `MetadataLog` adapter catalog and migration tooling.
+3. Move planner strategy policy registry into reusable operator-facing configuration surfaces.

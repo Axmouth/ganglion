@@ -1053,4 +1053,187 @@ mod tests {
         log.clear().expect("clear should discard history");
         assert!(log.entries().expect("entries after clear").is_empty());
     }
+
+    #[cfg(feature = "keratin")]
+    fn keratin_append_raw_payload(
+        log: &KeratinMetadataLog,
+        payload: Vec<u8>,
+    ) -> Result<(), MetadataLogError> {
+        log.run_async(log.keratin.append(
+            Message {
+                flags: 0,
+                headers: Vec::new(),
+                payload,
+            },
+            Some(KDurability::AfterFsync),
+        ))
+        .map(|_| ())
+    }
+
+    #[cfg(feature = "keratin")]
+    fn keratin_append_persisted_entry(
+        log: &KeratinMetadataLog,
+        term: u64,
+        index: u64,
+        snapshot: CoordinationSnapshot,
+    ) -> Result<(), MetadataLogError> {
+        let payload = serde_json::to_vec(&PersistedMetadataLogEntry {
+            term,
+            index,
+            snapshot: encode_snapshot(&snapshot)?,
+        })
+        .map_err(MetadataLogError::parse)?;
+
+        keratin_append_raw_payload(log, payload)
+    }
+
+    #[cfg(feature = "keratin")]
+    #[test]
+    fn keratin_metadata_log_truncates_small_tailing_corruption_tail() {
+        let root = unique_temp_dir_path("tail-corruption");
+        {
+            let log =
+                KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+                    .expect("keratin strict log should open");
+
+            log.append_entry(
+                1,
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("append valid entry");
+            log.append_entry(
+                1,
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..Default::default()
+                },
+            )
+            .expect("append valid entry");
+
+            keratin_append_raw_payload(&log, b"{not-json}".to_vec())
+                .expect("append malformed tail");
+        }
+
+        let log = KeratinMetadataLog::with_replay_policy(
+            &root,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        )
+        .expect("keratin truncated-tail log should open");
+        let entries = log
+            .entries()
+            .expect("truncation policy should recover consistent prefix");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].snapshot.generation, 2);
+    }
+
+    #[cfg(feature = "keratin")]
+    #[test]
+    fn keratin_metadata_log_rejects_large_tailing_corruption_tail() {
+        let root = unique_temp_dir_path("tail-corruption-limit");
+        {
+            let log =
+                KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+                    .expect("keratin strict log should open");
+
+            log.append_entry(
+                1,
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("append valid entry");
+
+            keratin_append_raw_payload(&log, b"{bad}".to_vec()).expect("append malformed record");
+            keratin_append_raw_payload(&log, b"{bad}".to_vec()).expect("append malformed record");
+        }
+
+        let err = KeratinMetadataLog::with_replay_policy(
+            &root,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        )
+        .expect("keratin log should reopen")
+        .entries()
+        .expect_err("too much trailing corruption should fail");
+        assert!(matches!(err, MetadataLogError::Parse(_)));
+    }
+
+    #[cfg(feature = "keratin")]
+    #[test]
+    fn keratin_metadata_log_rejects_non_sequential_index() {
+        let root = unique_temp_dir_path("non-seq-index");
+        {
+            let log =
+                KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+                    .expect("keratin strict log should open");
+
+            log.append_entry(
+                1,
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("append first entry");
+            keratin_append_persisted_entry(
+                &log,
+                1,
+                3,
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..Default::default()
+                },
+            )
+            .expect("append non-sequential entry");
+        }
+
+        let err = KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+            .expect("keratin strict log should reopen")
+            .entries()
+            .expect_err("non-sequential index should fail");
+        assert!(matches!(err, MetadataLogError::Parse(_)));
+    }
+
+    #[cfg(feature = "keratin")]
+    #[test]
+    fn keratin_metadata_log_recoverable_non_sequential_tail() {
+        let root = unique_temp_dir_path("non-seq-index-truncated");
+        {
+            let log =
+                KeratinMetadataLog::with_replay_policy(&root, FileMetadataReplayPolicy::Strict)
+                    .expect("keratin strict log should open");
+
+            log.append_entry(
+                1,
+                CoordinationSnapshot {
+                    generation: 1,
+                    ..Default::default()
+                },
+            )
+            .expect("append first entry");
+            keratin_append_persisted_entry(
+                &log,
+                1,
+                3,
+                CoordinationSnapshot {
+                    generation: 2,
+                    ..Default::default()
+                },
+            )
+            .expect("append non-sequential entry");
+        }
+
+        let entries = KeratinMetadataLog::with_replay_policy(
+            &root,
+            FileMetadataReplayPolicy::TruncateTail { max_tail_lines: 1 },
+        )
+        .expect("keratin truncated-tail log should open")
+        .entries()
+        .expect("recoverable non-sequential tail should truncate to prefix");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].snapshot.generation, 1);
+    }
 }

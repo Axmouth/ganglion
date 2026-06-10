@@ -613,3 +613,43 @@ This file is the detailed history of everything done in this repo, modeled after
   1. Offer additional backend adapters behind `MetadataLog` (`keratin`, other append-log providers).
   2. Add snapshot retention and compaction tooling for durable logs.
   3. Move planner strategy registry and strategy-specific defaults into a reusable catalog.
+
+## v20 execution pass completed
+
+- `ganglion-storage`:
+  - Added Keratin parity coverage mirroring malformed-tail and sequence-boundary behavior from the file backend:
+    - `keratin_metadata_log_truncates_small_tailing_corruption_tail`
+    - `keratin_metadata_log_rejects_large_tailing_corruption_tail`
+    - `keratin_metadata_log_rejects_non_sequential_index`
+    - `keratin_metadata_log_recoverable_non_sequential_tail`
+  - Fixed replay isolation in those tests so the initial writer handle drops before reopening:
+    - avoids `Keratin already open for <root>` errors caused by keeping the first handle alive.
+  - Kept alignment with file semantics:
+    - bounded-tail recovery is accepted only within policy limits,
+    - stricter invalid tails still hard-fail.
+
+- `ganglion-openraft`:
+  - Re-ran persisted-node regressions after `ganglion-storage` parity additions to keep adapter constructor behavior unchanged.
+
+- Operational note:
+  - A prior hang was reproducible only in an unrelated long-running background invocation path, not in direct targeted validation here. Core logic test paths now run without hanging.
+
+- Validation:
+  - `cargo test -p ganglion-storage --features keratin`
+  - `cargo test -p ganglion-storage --features keratin keratin_metadata_log -- --nocapture`
+  - `cargo test -p ganglion-openraft --quiet`
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep a one-shot validation command as the default local gate for storage parity + startup constructors.
+  2. Add fuzz-backed tail-boundary generators for both file and keratin storage inputs.
+  3. Add backend-selection artifacts so startup replay policy and adapter choice are explicit in test output.
+- Medium-term:
+  1. Expand Jepsen-style persistence scenarios to include explicit Keratin and file restart/failover transitions.
+  2. Add durable-snapshot publication paths with recovery telemetry and health visibility.
+  3. Replace placeholder consensus transport with full openraft runtime wiring while preserving current persisted contracts.
+- Long-term:
+  1. Add snapshot retention, compaction, and storage maintenance paths for metadata durability.
+  2. Grow adapter catalog for non-WAL/WAL-like stores with feature-gated constructors.
+  3. Move planner strategy registry into a reusable policy catalog with operator tuning knobs.
