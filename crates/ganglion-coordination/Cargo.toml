@@ -1,0 +1,8 @@
+[package]
+name = "ganglion-coordination"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ganglion-core = { path = "../ganglion-core" }
+tokio = { version = "1", features = ["sync", "rt"] }

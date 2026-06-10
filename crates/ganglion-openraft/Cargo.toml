@@ -1,0 +1,10 @@
+[package]
+name = "ganglion-openraft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ganglion-core = { path = "../ganglion-core" }
+
+[dev-dependencies]
+ganglion-coordination = { path = "../ganglion-coordination" }

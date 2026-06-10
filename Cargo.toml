@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ganglion-core",
+    "crates/ganglion-openraft",
+    "crates/ganglion-coordination",
+]

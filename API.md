@@ -1,0 +1,99 @@
+# Ganglion API
+
+This file tracks what each part of the current scaffolding is meant to do.
+
+## Core (`ganglion-core`)
+
+- `ResourceIdentity`
+  - Generic identity for any sharded resource (`namespace`, `name`, `partition`, optional `group`).
+  - Used by planners and coordinators without queue-specific assumptions.
+
+- `NodeInfo`
+  - Control-plane metadata for a node.
+  - Holds node id, data endpoint, admin endpoint, and labels.
+
+- `PartitionAssignment`
+  - Describes owner, followers, epoch, and durability policy for one resource.
+  - Includes helper methods for role checks and replica-set size.
+
+- `CoordinationSnapshot`
+  - Snapshot of all known nodes and assignments with a monotonic `generation`.
+  - Used as the atomic metadata state contract for consensus-backed storage.
+
+- `PlacementInput`
+  - Planner input with live node set, current desired resources, existing assignments, follower target, and generation.
+
+- `PartitionPlacementPolicy`
+  - Trait for pluggable placement strategy.
+  - Pure function: `(PlacementInput) -> PlacementPlan`.
+
+- `DeterministicPartitionPlacement`
+  - First policy implementation.
+  - Conservative behavior:
+    - reuse existing owner if alive,
+    - preserve follower order where possible,
+    - fill missing follower slots predictably.
+
+- `plan_local_assignment_transitions`
+  - Produces local per-node role transitions from previous and next snapshots.
+  - Intended for components that need to demote/pause/promote work safely.
+
+- `ReplicationDurabilityPolicy/Requirement`
+  - Generic durability contracts for metadata write acceptance.
+  - Does not couple to transport.
+
+## Openraft adapter crate (`ganglion-openraft`)
+
+- `MetadataConsensus`
+  - Minimal control-plane trait for consensus adapters.
+  - Supports local role checks, current leader read, and snapshot apply/read.
+
+- `InMemoryMetadataNode`
+  - Local, in-memory placeholder implementation.
+  - Enforces raft-like write invariants in-memory:
+    - local leader must propose on writes,
+    - stale term and stale generation updates are rejected,
+    - term changes can invalidate prior in-memory history.
+  - Stores a local node identity and current term for debugging/inspection.
+  - Exposes small debugging helpers used by tests:
+    - `current_term()`
+    - `log_len()`
+    - `last_index()`
+    - `last_term()`.
+  - Intended as bootstrap harness until real openraft adapter logic is wired in.
+
+- `OpenraftAdapterError`
+  - Small error surface shared by metadata adapter operations.
+
+- `plan_and_apply`
+  - Runs a planner and applies the resulting snapshot in one call.
+  - Used in early control-loop bootstrapping.
+
+- `plan_and_publish`
+  - Runs a planner and consensus apply, then publishes the committed snapshot through a callback.
+  - Useful for control-plane loops where observers consume assignment updates from the same node.
+
+## Planned next part
+
+- `ganglion-openraft` full Raft engine integration to replace current in-memory placeholder.
+- Optional storage adapter crate (`ganglion-keratin`), wired behind storage traits.
+- Optional transport/watch layer for snapshot notifications and controller handoff loops.
+
+## Coordination crate (`ganglion-coordination`)
+
+- `CoordinationProvider`
+  - Read/watch abstraction for snapshot consumers.
+  - Exposes:
+    - `snapshot()`
+    - `owns_resource(...)`
+    - `follows_resource(...)`
+    - `watch()`
+- `InMemoryCoordination`
+  - Mutable testable provider with broadcast updates.
+  - Keeps an in-memory snapshot and emits updates through `tokio::sync::watch`.
+- `StaticCoordination`
+  - Immutable fixture provider for tests and bootstrap deployments.
+- Helpers
+  - `owned_resources(...)`
+  - `followed_resources(...)`
+  - `owned_by_snapshot(...)`
