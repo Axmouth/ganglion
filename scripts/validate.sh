@@ -96,8 +96,8 @@ run_tests() {
 }
 
 run_startup_smoke() {
-  echo "validate: cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet"
-  cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet
+  echo "validate: cargo test -p ganglion-openraft persisted_node_startup --quiet"
+  cargo test -p ganglion-openraft persisted_node_startup --quiet
   SUMMARY_STARTUP_SMOKE="pass"
 }
 

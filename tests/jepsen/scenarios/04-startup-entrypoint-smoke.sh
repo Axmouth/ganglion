@@ -15,5 +15,5 @@ fi
 
 echo "INFO: clojure runtime missing; running local smoke invariants"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-cargo test -p ganglion-openraft persisted_node_startup_entrypoint_smoke_checks --quiet
+cargo test -p ganglion-openraft persisted_node_startup --quiet
 echo "INFO: startup-entrypoint-smoke completed"

@@ -667,6 +667,48 @@ Make persisted startup policy pluggable through explicit profiles and surface st
 2. Add snapshot compaction/migration and durable retention tooling.
 3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
 
+## Plan Snapshot v17
+
+### Goal
+
+Validate startup-profile transitions under mixed valid-tail logs and prove restart->control-loop behavior in startup smoke coverage.
+
+### Completed in this snapshot
+
+- Added deterministic transition coverage for startup profile selection on mixed tails:
+  - explicit profile override (`tail:3`) succeeds where environment strict/default would fail,
+  - mixed valid lines (`# comment`, blank) are excluded from malformed-tail budget,
+  - bounded-tail recovery still honors `default` when malformed count is within tolerance.
+- Added startup restart smoke end-to-end control-loop coverage:
+  - `persisted_node_recovered_startup_replays_control_loop_on_next_apply` recovers a persisted node from mixed tail, then runs
+    `plan_and_publish` successfully with a watcher.
+- Updated startup-entrypoint Jepsen fallback scenario to execute all startup-prefixed tests:
+  - `cargo test -p ganglion-openraft persisted_node_startup --quiet`.
+
+### Short-Term Roadmap
+
+#### Resolution target: operational confidence
+
+1. Keep constructor startup-policy matrix explicit for remaining path permutations (including explicit strict + explicit default + env).
+2. Add startup policy behavior to control-loop/jepsen artifacts in a dedicated failure matrix.
+3. Prepare first Keratin-backed persisted adapter adapter-path once API is frozen.
+
+### Medium-Term Roadmap
+
+#### Resolution target: transport-real metadata plane
+
+1. Replace placeholder consensus path with true openraft transport and persistence lifecycle hooks.
+2. Add committed-snapshot event stream for controllers and watchers.
+3. Expand partition/failover sequence coverage with scripted fallback executions.
+
+### Long-Term Roadmap
+
+#### Resolution target: production-ready pluggability
+
+1. Add planner strategy registry and parameterized strategy options.
+2. Add snapshot compaction/migration and durable retention tooling.
+3. Offer stable backend adapters for Keratin and additional WAL/event log stores.
+
 ## Plan Snapshot v12
 
 ### Goal

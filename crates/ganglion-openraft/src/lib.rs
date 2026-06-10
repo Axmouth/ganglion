@@ -1123,6 +1123,88 @@ mod tests {
     }
 
     #[test]
+    fn persisted_node_startup_profile_selection_with_mixed_tail_and_explicit_override() {
+        let _env_guard = with_env_lock();
+        let env_var = PersistedMetadataReplayProfile::env_var_name();
+        let original = env::var_os(env_var);
+        env::set_var(env_var, "strict");
+
+        let path = unique_temp_path("startup-profile-selection");
+        prepare_persisted_log_with_corruption_tail(&path, 2, vec![0, 1, 2, 0])
+            .expect("startup-log fixture should include a mixed tail with two malformed entries");
+
+        let strict_like_failure = PersistedMetadataNode::new_with_replay_profile_str(
+            path.clone(),
+            "node-a",
+            CoordinationSnapshot::default(),
+            None,
+        )
+        .expect_err("environment strict should fail with malformed tail beyond tolerance");
+        assert!(matches!(
+            strict_like_failure,
+            OpenraftAdapterError::Storage(_)
+        ));
+
+        let (explicit_node, explicit_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                path.clone(),
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("tail:3"),
+            )
+            .expect("explicit tail profile should override env");
+        assert_eq!(
+            explicit_resolution,
+            PersistedMetadataReplayProfileResolution {
+                profile: PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 3 },
+                source: PersistedMetadataReplayProfileSource::Explicit
+            }
+        );
+        assert_eq!(
+            explicit_node.snapshot().generation,
+            2,
+            "explicit tail allowance should recover from mixed valid tail"
+        );
+
+        let default_profile_rejects = PersistedMetadataNode::new_with_replay_profile_str(
+            path,
+            "node-a",
+            CoordinationSnapshot::default(),
+            Some("default"),
+        )
+        .expect_err("default profile should not tolerate two mixed malformed lines");
+        assert!(matches!(
+            default_profile_rejects,
+            OpenraftAdapterError::Storage(_)
+        ));
+
+        let path_default_ok = unique_temp_path("startup-profile-selection-default-ok");
+        prepare_persisted_log_with_corruption_tail(&path_default_ok, 2, vec![0, 1, 2])
+            .expect("startup-log fixture should include a mixed tail with one malformed line");
+        let (default_ok_node, default_ok_resolution) =
+            PersistedMetadataNode::new_with_replay_profile_str(
+                path_default_ok,
+                "node-a",
+                CoordinationSnapshot::default(),
+                Some("default"),
+            )
+            .expect("default profile keyword should tolerate one malformed line");
+        assert_eq!(
+            default_ok_resolution.profile,
+            PersistedMetadataReplayProfile::Default
+        );
+        assert_eq!(
+            default_ok_node.startup_replay_profile(),
+            PersistedMetadataReplayProfile::Default
+        );
+
+        match original {
+            Some(value) => env::set_var(env_var, value),
+            None => env::remove_var(env_var),
+        }
+    }
+
+    #[test]
     fn persisted_node_startup_entrypoint_smoke_checks() {
         let _env_guard = with_env_lock();
         let env_var = PersistedMetadataReplayProfile::env_var_name();
@@ -1270,6 +1352,73 @@ mod tests {
             Some(value) => env::set_var(env_var, value),
             None => env::remove_var(env_var),
         }
+    }
+
+    #[test]
+    fn persisted_node_recovered_startup_replays_control_loop_on_next_apply() {
+        let path = unique_temp_path("startup-control-loop-replay");
+        let initial_snapshot = CoordinationSnapshot {
+            generation: 1,
+            ..CoordinationSnapshot::default()
+        };
+        let node =
+            PersistedMetadataNode::new(path.clone(), "node-a", CoordinationSnapshot::default())
+                .expect("constructor should initialize node");
+        node.set_leader("node-a");
+        node.apply_snapshot("node-a", initial_snapshot.clone(), Some(1))
+            .expect("initial snapshot should persist");
+
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write as _;
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("append valid mixed tail");
+            file.write_all(b"{bad-json}\n# comment line\n\n")
+                .expect("write mixed replay tail");
+        }
+
+        let restarted = PersistedMetadataNode::new_with_replay_profile(
+            path,
+            "node-a",
+            CoordinationSnapshot::default(),
+            PersistedMetadataReplayProfile::TruncateTail { max_tail_lines: 2 },
+        )
+        .expect("restarted node should recover from mixed tail");
+        assert_eq!(restarted.snapshot().generation, 1);
+
+        restarted.set_leader("node-a");
+
+        let nodes = {
+            let mut next_nodes = build_default_nodes();
+            next_nodes.insert(
+                "node-c".to_string(),
+                ganglion_core::NodeInfo::new("node-c", "127.0.0.1:3", None::<String>),
+            );
+            next_nodes
+        };
+
+        let input = PlannerInput {
+            nodes,
+            resources: vec![ResourceIdentity::new("svc", "orders", 0, None::<String>)],
+            existing: BTreeMap::new(),
+            target_followers: 1,
+            generation: 2,
+        };
+
+        let coordination = InMemoryCoordination::new(CoordinationSnapshot::default());
+        let published = plan_and_publish(
+            &restarted,
+            "node-a",
+            &DeterministicPartitionPlacement,
+            input,
+            |snapshot| coordination.update_snapshot(snapshot),
+        )
+        .expect("restarted node should publish control-loop output");
+
+        assert_eq!(published.generation, 2);
+        assert_eq!(coordination.snapshot(), published);
     }
 
     #[test]

@@ -322,6 +322,38 @@ This file is the detailed history of everything done in this repo, modeled after
   2. Add durable retention and compaction tooling for replay logs.
   3. Expand backend adapters and migration plans beyond basic file logs.
 
+## v17 execution pass completed
+
+- `ganglion-openraft`:
+  - Added mixed-tail startup profile transition coverage in
+    `persisted_node_startup_profile_selection_with_mixed_tail_and_explicit_override`:
+    - env-strict path fails on two malformed tail lines (`default`-like tolerance),
+    - explicit `tail:3` succeeds by overriding env,
+    - explicit `default` preserves bounded-tail semantics.
+  - Added explicit mixed-tail recovery path for control-loop continuity in
+    `persisted_node_recovered_startup_replays_control_loop_on_next_apply`:
+    - recovers from persisted node with mixed tail,
+    - runs `plan_and_publish` on recovered node,
+    - verifies watcher snapshot publication.
+- Validation:
+  - Updated startup-entrypoint Jepsen fallback to run startup-prefixed tests as a group:
+    - `cargo test -p ganglion-openraft persisted_node_startup --quiet`.
+
+## Roadmap update (no timestamps)
+
+- Short-term:
+  1. Keep constructor startup-policy matrix explicit for remaining path permutations (including explicit strict + explicit default + env).
+  2. Add startup policy behavior into control-loop/jepsen artifact-level failure matrices.
+  3. Start Keratin-backed persisted adapter scaffolding once the persisted constructor surface is stable.
+- Medium-term:
+  1. Replace placeholder consensus path with true openraft transport and keep same contracts.
+  2. Add committed-snapshot event stream for controllers and watchers.
+  3. Expand partition/failover sequence coverage with scripted fallback executions.
+- Long-term:
+  1. Add planner strategy registry with parameterized policies.
+  2. Add durable retention and migration tooling.
+  3. Expand backend adapters and migration plans beyond basic file logs.
+
 ## v16 execution pass completed
 
 - Validation scaffolding:
