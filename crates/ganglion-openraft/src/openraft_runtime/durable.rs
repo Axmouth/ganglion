@@ -1,0 +1,405 @@
+//! File-backed `RaftLogStorage` for [`GanglionRaftConfig`].
+//!
+//! A JSON-lines WAL holds vote, entry, truncate, and purge records. The full
+//! file is folded into memory on open; appends are fsynced before the raft
+//! flush callback fires. Purge compacts the WAL by rewriting it (purge is rare
+//! and the metadata log is small). The state machine stays in-memory: openraft
+//! re-commits/re-applies surviving log entries after restart, and snapshot
+//! transfer covers nodes whose logs were purged.
+
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::ops::RangeBounds;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use openraft::async_trait::async_trait;
+use openraft::storage::{LogFlushed, RaftLogStorage};
+use openraft::{Entry, LogId, LogState, RaftLogReader, StorageError, StorageIOError, Vote};
+use serde::{Deserialize, Serialize};
+
+use super::GanglionRaftConfig;
+
+type NodeId = u64;
+
+#[derive(Serialize, Deserialize)]
+enum WalRecord {
+    Vote(Vote<NodeId>),
+    Entry(Entry<GanglionRaftConfig>),
+    /// Remove entries with `index >= since`.
+    Truncate { since: u64 },
+    /// Remove entries with `index <= upto.index` and remember the purge point.
+    Purge { upto: LogId<NodeId> },
+}
+
+#[derive(Debug, Default)]
+struct DurableState {
+    vote: Option<Vote<NodeId>>,
+    log: BTreeMap<u64, Entry<GanglionRaftConfig>>,
+    last_purged_log_id: Option<LogId<NodeId>>,
+}
+
+impl DurableState {
+    fn apply_record(&mut self, record: WalRecord) {
+        match record {
+            WalRecord::Vote(vote) => self.vote = Some(vote),
+            WalRecord::Entry(entry) => {
+                self.log.insert(entry.log_id.index, entry);
+            }
+            WalRecord::Truncate { since } => {
+                self.log.split_off(&since);
+            }
+            WalRecord::Purge { upto } => {
+                self.last_purged_log_id = Some(upto);
+                let retained = self.log.split_off(&(upto.index + 1));
+                self.log = retained;
+            }
+        }
+    }
+}
+
+struct DurableInner {
+    state: DurableState,
+    file: File,
+}
+
+/// Durable raft log + vote store persisted as a JSON-lines WAL.
+#[derive(Clone)]
+pub struct FileRaftLogStore {
+    path: PathBuf,
+    inner: Arc<Mutex<DurableInner>>,
+}
+
+impl FileRaftLogStore {
+    /// Open (or create) the WAL at `path` and replay it. Replay is strict:
+    /// malformed records fail startup rather than risking divergent raft state.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, StorageError<NodeId>> {
+        let path = path.into();
+        let mut state = DurableState::default();
+
+        if path.exists() {
+            let file = File::open(&path)
+                .map_err(|error| StorageIOError::read_logs(&error))?;
+            for (line_no, line) in BufReader::new(file).lines().enumerate() {
+                let line = line.map_err(|error| StorageIOError::read_logs(&error))?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let record: WalRecord = serde_json::from_str(&line).map_err(|error| {
+                    StorageIOError::read_logs(&std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("malformed WAL record at line {}: {error}", line_no + 1),
+                    ))
+                })?;
+                state.apply_record(record);
+            }
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+
+        Ok(Self {
+            path,
+            inner: Arc::new(Mutex::new(DurableInner { state, file })),
+        })
+    }
+
+    fn write_record(
+        inner: &mut DurableInner,
+        record: &WalRecord,
+    ) -> Result<(), StorageError<NodeId>> {
+        let mut line =
+            serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
+        line.push(b'\n');
+        inner
+            .file
+            .write_all(&line)
+            .and_then(|()| inner.file.sync_data())
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        Ok(())
+    }
+
+    /// Rewrite the WAL compacted to current state (used after purge).
+    fn rewrite(&self, inner: &mut DurableInner) -> Result<(), StorageError<NodeId>> {
+        let tmp_path = self.path.with_extension("tmp");
+        let mut tmp = File::create(&tmp_path)
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+
+        let mut write_line = |record: &WalRecord| -> Result<(), StorageError<NodeId>> {
+            let mut line = serde_json::to_vec(record)
+                .map_err(|error| StorageIOError::write_logs(&error))?;
+            line.push(b'\n');
+            tmp.write_all(&line)
+                .map_err(|error| StorageIOError::write_logs(&error))?;
+            Ok(())
+        };
+
+        if let Some(vote) = inner.state.vote {
+            write_line(&WalRecord::Vote(vote))?;
+        }
+        if let Some(upto) = inner.state.last_purged_log_id {
+            write_line(&WalRecord::Purge { upto })?;
+        }
+        for entry in inner.state.log.values() {
+            write_line(&WalRecord::Entry(entry.clone()))?;
+        }
+        tmp.sync_data()
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        drop(tmp);
+
+        std::fs::rename(&tmp_path, &self.path)
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        inner.file = OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        Ok(())
+    }
+
+    /// Persist and index a batch of entries with a single fsync
+    /// (shared by the trait impl and tests).
+    fn append_entries(
+        &self,
+        entries: impl IntoIterator<Item = Entry<GanglionRaftConfig>>,
+    ) -> Result<(), StorageError<NodeId>> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut batch = Vec::new();
+        let mut staged = Vec::new();
+        for entry in entries {
+            let line = serde_json::to_vec(&WalRecord::Entry(entry.clone()))
+                .map_err(|error| StorageIOError::write_logs(&error))?;
+            batch.extend_from_slice(&line);
+            batch.push(b'\n');
+            staged.push(entry);
+        }
+        if staged.is_empty() {
+            return Ok(());
+        }
+        inner
+            .file
+            .write_all(&batch)
+            .and_then(|()| inner.file.sync_data())
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        for entry in staged {
+            inner.state.log.insert(entry.log_id.index, entry);
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl RaftLogReader<GanglionRaftConfig> for FileRaftLogStore {
+    async fn get_log_state(
+        &mut self,
+    ) -> Result<LogState<GanglionRaftConfig>, StorageError<NodeId>> {
+        let inner = self.inner.lock().unwrap();
+        let last_purged_log_id = inner.state.last_purged_log_id;
+        let last_log_id = inner
+            .state
+            .log
+            .values()
+            .next_back()
+            .map(|entry| entry.log_id)
+            .or(last_purged_log_id);
+        Ok(LogState {
+            last_purged_log_id,
+            last_log_id,
+        })
+    }
+
+    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send + Sync>(
+        &mut self,
+        range: RB,
+    ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .state
+            .log
+            .range(range)
+            .map(|(_, entry)| entry.clone())
+            .collect())
+    }
+}
+
+#[async_trait]
+impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
+    type LogReader = Self;
+
+    async fn get_log_reader(&mut self) -> Self::LogReader {
+        self.clone()
+    }
+
+    async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::write_record(&mut inner, &WalRecord::Vote(*vote))?;
+        inner.state.vote = Some(*vote);
+        Ok(())
+    }
+
+    async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>> {
+        Ok(self.inner.lock().unwrap().state.vote)
+    }
+
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: LogFlushed<NodeId>,
+    ) -> Result<(), StorageError<NodeId>>
+    where
+        I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
+        I::IntoIter: Send,
+    {
+        match self.append_entries(entries) {
+            Ok(()) => {
+                callback.log_io_completed(Ok(()));
+                Ok(())
+            }
+            Err(error) => {
+                callback.log_io_completed(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    error.to_string(),
+                )));
+                Err(error)
+            }
+        }
+    }
+
+    async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        let mut inner = self.inner.lock().unwrap();
+        Self::write_record(
+            &mut inner,
+            &WalRecord::Truncate {
+                since: log_id.index,
+            },
+        )?;
+        inner.state.log.split_off(&log_id.index);
+        Ok(())
+    }
+
+    async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.state.last_purged_log_id = Some(log_id);
+        let retained = inner.state.log.split_off(&(log_id.index + 1));
+        inner.state.log = retained;
+        self.rewrite(&mut inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openraft::testing::{StoreBuilder, Suite};
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_wal_path(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "ganglion-raft-wal-{tag}-{}-{nanos}-{unique}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    struct FileBuilder;
+
+    #[async_trait]
+    impl StoreBuilder<GanglionRaftConfig, FileRaftLogStore, super::super::GanglionStateMachine, ()>
+        for FileBuilder
+    {
+        async fn build(
+            &self,
+        ) -> Result<
+            ((), FileRaftLogStore, super::super::GanglionStateMachine),
+            StorageError<NodeId>,
+        > {
+            let store = FileRaftLogStore::open(unique_wal_path("suite"))?;
+            Ok(((), store, super::super::GanglionStateMachine::default()))
+        }
+    }
+
+    #[test]
+    fn file_store_passes_openraft_contract_suite() -> Result<(), StorageError<NodeId>> {
+        Suite::test_all(FileBuilder)
+    }
+
+    #[test]
+    fn file_store_survives_reopen_with_vote_log_and_purge() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            use super::super::MetadataRaftCommand;
+            use ganglion_core::CoordinationSnapshot;
+            use openraft::{CommittedLeaderId, EntryPayload};
+
+            let path = unique_wal_path("reopen");
+            let leader = CommittedLeaderId::new(1, 0);
+            let make_entry = |index: u64, generation: u64| Entry::<GanglionRaftConfig> {
+                log_id: LogId::new(leader, index),
+                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(
+                    CoordinationSnapshot {
+                        generation,
+                        ..CoordinationSnapshot::default()
+                    },
+                )),
+            };
+
+            {
+                let mut store = FileRaftLogStore::open(&path).expect("open fresh");
+                store
+                    .save_vote(&Vote::new(1, 7))
+                    .await
+                    .expect("vote should persist");
+
+                store
+                    .append_entries((1..=5).map(|index| make_entry(index, index)))
+                    .expect("append should persist");
+
+                store
+                    .truncate(LogId::new(leader, 5))
+                    .await
+                    .expect("truncate should persist");
+                store
+                    .purge(LogId::new(leader, 2))
+                    .await
+                    .expect("purge should compact");
+            }
+
+            let mut reopened = FileRaftLogStore::open(&path).expect("reopen");
+            assert_eq!(
+                reopened.read_vote().await.expect("read vote"),
+                Some(Vote::new(1, 7))
+            );
+
+            let log_state = reopened.get_log_state().await.expect("log state");
+            assert_eq!(log_state.last_purged_log_id, Some(LogId::new(leader, 2)));
+            assert_eq!(log_state.last_log_id, Some(LogId::new(leader, 4)));
+
+            let entries = reopened
+                .try_get_log_entries(..)
+                .await
+                .expect("entries readable");
+            let indexes: Vec<u64> = entries.iter().map(|entry| entry.log_id.index).collect();
+            assert_eq!(indexes, vec![3, 4]);
+        });
+    }
+
+    #[test]
+    fn file_store_rejects_malformed_wal() {
+        let path = unique_wal_path("malformed");
+        std::fs::write(&path, b"{not-a-record}\n").expect("write bad WAL");
+        let result = FileRaftLogStore::open(&path);
+        assert!(result.is_err(), "malformed WAL must fail strict replay");
+    }
+}

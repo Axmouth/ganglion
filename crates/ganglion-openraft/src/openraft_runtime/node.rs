@@ -10,41 +10,57 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ganglion_core::CoordinationSnapshot;
+use openraft::storage::RaftLogStorage;
 use openraft::{BasicNode, Config, Raft};
 
 use crate::OpenraftAdapterError;
 
 use super::{
-    GanglionLogStore, GanglionRaft, GanglionStateMachine, InProcessRouter, MetadataRaftCommand,
-    MetadataRaftResponse,
+    GanglionLogStore, GanglionRaftConfig, GanglionRaftOf, GanglionStateMachine, InProcessRouter,
+    MetadataRaftCommand, MetadataRaftResponse,
 };
 
 type NodeId = u64;
 
 /// One raft-backed metadata node living inside a process-local cluster.
-pub struct RaftMetadataNode {
+///
+/// Generic over the raft log store: `GanglionLogStore` (in-memory, default) or
+/// `FileRaftLogStore` (durable WAL).
+pub struct RaftMetadataNode<LS = GanglionLogStore>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+{
     id: NodeId,
-    raft: GanglionRaft,
+    raft: GanglionRaftOf<LS>,
     state_machine: GanglionStateMachine,
 }
 
-impl RaftMetadataNode {
-    /// Start a node and register it on the router so peers can reach it.
+impl RaftMetadataNode<GanglionLogStore> {
+    /// Start an in-memory node and register it on the router.
     pub async fn start(
         id: NodeId,
         config: Arc<Config>,
         router: &InProcessRouter,
     ) -> Result<Self, OpenraftAdapterError> {
+        Self::start_with_store(id, config, router, GanglionLogStore::default()).await
+    }
+}
+
+impl<LS> RaftMetadataNode<LS>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+{
+    /// Start a node over the given log store and register it on the router.
+    pub async fn start_with_store(
+        id: NodeId,
+        config: Arc<Config>,
+        router: &InProcessRouter<LS>,
+        log_store: LS,
+    ) -> Result<Self, OpenraftAdapterError> {
         let state_machine = GanglionStateMachine::default();
-        let raft = Raft::new(
-            id,
-            config,
-            router.clone(),
-            GanglionLogStore::default(),
-            state_machine.clone(),
-        )
-        .await
-        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let raft = Raft::new(id, config, router.clone(), log_store, state_machine.clone())
+            .await
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
         router.register(id, raft.clone());
         Ok(Self {
             id,
@@ -172,7 +188,7 @@ impl RaftMetadataNode {
     }
 
     /// Access the raw raft handle for membership changes and metrics.
-    pub fn raft(&self) -> &GanglionRaft {
+    pub fn raft(&self) -> &GanglionRaftOf<LS> {
         &self.raft
     }
 
@@ -313,6 +329,81 @@ mod tests {
             for node in &nodes {
                 node.shutdown().await.expect("shutdown");
             }
+        });
+    }
+
+    #[test]
+    fn durable_node_recovers_committed_state_after_restart() {
+        use super::super::FileRaftLogStore;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let wal_path = std::env::temp_dir().join(format!(
+                "ganglion-durable-node-{}-{:?}.jsonl",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            ));
+            let timeout = Duration::from_secs(10);
+
+            {
+                let router = InProcessRouter::<FileRaftLogStore>::new();
+                let store = FileRaftLogStore::open(&wal_path).expect("open WAL");
+                let node = RaftMetadataNode::start_with_store(1, test_config(), &router, store)
+                    .await
+                    .expect("durable node should start");
+                node.initialize(basic_members(&[1]))
+                    .await
+                    .expect("single node should initialize");
+                node.wait_for_leader(1, timeout)
+                    .await
+                    .expect("single node should elect itself");
+
+                for generation in 1..=3 {
+                    node.write_snapshot(CoordinationSnapshot {
+                        generation,
+                        ..CoordinationSnapshot::default()
+                    })
+                    .await
+                    .expect("write should commit");
+                }
+                assert_eq!(node.committed_snapshot().generation, 3);
+
+                node.shutdown().await.expect("shutdown");
+                router.deregister(1);
+            }
+
+            // Restart from the same WAL: no initialize — membership, vote, and
+            // log come from disk; the fresh in-memory state machine catches up
+            // once the node re-elects itself and re-commits the log.
+            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let store = FileRaftLogStore::open(&wal_path).expect("reopen WAL");
+            let restarted = RaftMetadataNode::start_with_store(1, test_config(), &router, store)
+                .await
+                .expect("restarted node should start");
+            restarted
+                .wait_for_leader(1, timeout)
+                .await
+                .expect("restarted node should re-elect itself from durable state");
+
+            let mut watch = restarted.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < 3 {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("restarted node should recover generation 3");
+            assert_eq!(restarted.committed_snapshot().generation, 3);
+
+            restarted.shutdown().await.expect("shutdown restarted");
         });
     }
 }

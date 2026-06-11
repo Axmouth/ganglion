@@ -27,9 +27,19 @@ its signatures (e.g. `declare_raft_types` with `LeaderId`, `SnapshotDataOf`) do 
   `GanglionStateMachine` (RaftStateMachine + RaftSnapshotBuilder), both `Arc<Mutex<_>>`-shared and Clone.
   **Passing `openraft::testing::Suite::test_all`.** State machine deterministically rejects stale
   generations via `MetadataRaftResponse::accepted = false` (state unchanged) — never via error.
+  Committed state published via `watch` channel (`watch_committed()`, uses `send_replace`).
+- `openraft_runtime/network.rs`: `InProcessRouter<LS>`/`InProcessConnection<LS>` — generic over
+  log store, RPCs forwarded straight into peer `Raft` handles; `deregister` ⇒ `Unreachable`.
+- `openraft_runtime/node.rs`: `RaftMetadataNode<LS>` — `start`/`start_with_store`, `initialize`,
+  `write_snapshot` (ForwardToLeader→NotLeader, rejected commit→StaleGeneration),
+  `watch_committed`, wait helpers, `shutdown`. 3-node cluster + durable restart tests pass.
+- `openraft_runtime/durable.rs`: `FileRaftLogStore` — JSON-lines WAL (Vote/Entry/Truncate/Purge
+  records), strict replay on open, batched fsync appends, purge compacts via tmp-file rewrite.
+  Also passes `Suite::test_all`. State machine stays in-memory: openraft re-commits the log after
+  restart (single voter re-elects from persisted vote+membership-in-log; no re-initialize!).
 
-Still to build: `RaftNetwork`/`RaftNetworkFactory` (in-process router first), runtime node that
-wraps `Raft<...>` and implements `MetadataConsensus`.
+Still to build: membership change/learner flows, raft failure scenarios in Jepsen inventory,
+wire transport.
 
 ## 2) Verified API gotchas (cost time once; don't rediscover)
 

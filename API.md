@@ -130,19 +130,24 @@ This file tracks what each part of the current scaffolding is meant to do.
     `accepted = false`, decided deterministically inside the replicated state machine.
 - `GanglionLogStore`
   - In-memory `RaftLogReader` + `RaftLogStorage`; passes `openraft::testing::Suite`.
+- `FileRaftLogStore`
+  - Durable WAL-backed `RaftLogStorage` (JSON lines: vote/entry/truncate/purge records); strict
+    replay on open, fsynced appends, purge-time compaction. Also passes the contract suite.
+  - `FileRaftLogStore::open(path)`.
 - `GanglionStateMachine`
   - `RaftStateMachine` + `RaftSnapshotBuilder`; holds the committed `CoordinationSnapshot`,
     JSON snapshot build/install, and publishes committed state on a `tokio::sync::watch` channel
     (`watch_committed()`).
-- `InProcessRouter` / `InProcessConnection`
+- `InProcessRouter<LS>` / `InProcessConnection<LS>`
   - `RaftNetworkFactory` / `RaftNetwork` routing RPCs between same-process `Raft` handles;
-    `deregister` simulates unreachable peers.
-- `GanglionRaft`
-  - Concrete `Raft<GanglionRaftConfig, InProcessRouter, GanglionLogStore, GanglionStateMachine>` alias.
-- `RaftMetadataNode`
-  - Runtime node: `start`, `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`,
-    rejected stale commit → `StaleGeneration`), `committed_snapshot`, `watch_committed`,
-    leader/applied-index wait helpers, `shutdown`.
+    generic over the log store (default `GanglionLogStore`); `deregister` simulates unreachable peers.
+- `GanglionRaftOf<LS>` / `GanglionRaft`
+  - Raft handle aliases (generic / default in-memory).
+- `RaftMetadataNode<LS>`
+  - Runtime node: `start` (in-memory) / `start_with_store` (any log store, e.g. `FileRaftLogStore`),
+    `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`, rejected stale commit →
+    `StaleGeneration`), `committed_snapshot`, `watch_committed`, leader/applied-index wait helpers,
+    `shutdown`. Durable restart: reopen the WAL and `start_with_store` again — do not re-`initialize`.
 - `default_raft_config()`
   - Validated default `openraft::Config`.
 

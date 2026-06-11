@@ -12,11 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::OpenraftAdapterError;
 
+mod durable;
 mod network;
 mod node;
 mod storage;
 
-pub use network::{GanglionRaft, InProcessConnection, InProcessRouter};
+pub use durable::FileRaftLogStore;
+pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
 pub use node::RaftMetadataNode;
 pub use storage::{GanglionLogStore, GanglionStateMachine};
 

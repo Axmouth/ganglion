@@ -420,3 +420,23 @@ work in reverse-briefness order while keeping one live roadmap block.
 - `API.md` updated with the full feature-gated openraft runtime surface.
 - Next objective: durable raft storage (`MetadataLog`-backed log/vote persistence + restart
   recovery through the raft path).
+
+## Iteration 42 — Durable raft log store and restart recovery
+
+- Added `FileRaftLogStore` (`openraft_runtime/durable.rs`): JSON-lines WAL holding vote/entry/
+  truncate/purge records, strict replay on open, fsync-before-callback appends (batched: one
+  `sync_data` per append batch), and purge-triggered compaction via atomic tmp-file rewrite.
+- Deliberate deviation from the plan wording: did NOT reuse `MetadataLog` — its entry shape
+  (`term`/`index`/`snapshot`) cannot carry raft membership/blank entries or votes without lossy
+  mapping. A dedicated WAL is simpler and correct; a Keratin-backed raft WAL can implement the
+  same surface later if wanted.
+- **`FileRaftLogStore` passes `openraft::testing::Suite::test_all`**, plus reopen tests
+  (vote + entries + truncate + purge survive restart) and strict malformed-WAL rejection.
+- Generalized the in-process stack over the log store type: `InProcessRouter<LS>`,
+  `InProcessConnection<LS>`, `GanglionRaftOf<LS>`, `RaftMetadataNode<LS>` (defaults keep the
+  in-memory types unchanged for existing callers).
+- Added end-to-end restart test: single durable node commits generations 1–3, shuts down,
+  reopens the same WAL, re-elects itself from persisted vote/membership/log, and the fresh
+  in-memory state machine recovers generation 3 through re-commit (observed via the watch).
+- Short-term roadmap items 1 and 2 are now done; item 3 (failure scenarios in Jepsen fallback
+  inventory) is next.
