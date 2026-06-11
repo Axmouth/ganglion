@@ -317,3 +317,10 @@ work in reverse-briefness order while keeping one live roadmap block.
   - minimal storage/network/runtime traits,
   - compaction/snapshot behavior that must stay stable across turns.
 - Scoped the doc to quick recovery needs so context compaction only needs this one page plus `PLAN`/`WORKLOG`.
+
+## Iteration 35 — Survival context compact rewrite
+
+- Rewrote `OPENRAFT_SURVIVAL_CONTEXT.md` into a tighter restart sheet with only essential
+  compile-time API signatures for `openraft = 0.8.9`.
+- Kept the document focused on direct dependency anchors and removed non-essential historical notes
+  to support fast context recovery.
