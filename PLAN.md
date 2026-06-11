@@ -41,6 +41,7 @@ rather than a design driver.
 - Add explicit restart/failover regression coverage for control-loop continuity and multi-backend recovery ordering.
 - Keep openraft feature usage optional and fully gated behind explicit Cargo features.
 - Add a pluggable planner strategy registry and at least one alternate strategy implementation (`least-loaded`) with deterministic selector helpers.
+- Seed a small feature-gated openraft runtime scaffold module now; keep behavior migration to real runtime incremental and backward compatible.
 
 ## Short-term roadmap
 

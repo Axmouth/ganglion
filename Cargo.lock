@@ -402,6 +402,8 @@ dependencies = [
  "ganglion-storage",
  "openraft",
  "proptest",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

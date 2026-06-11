@@ -27,6 +27,10 @@ work in reverse-briefness order while keeping one live roadmap block.
 2. Expand persistence adapters and durable metadata maintenance tooling (retention/compaction/migration).
 3. Generalize package-level integration so queue-specific consumers stay decoupled from `ganglion` primitives.
 
+### Worklog maintenance
+
+- When this file gets too long to scan quickly, continue iteration entries in `WORKLOG.2.md` and keep this file as the active segment.
+
 ## Iteration 0 — Planning and scope alignment
 
 - Initialized project planning from `fibril` references:
@@ -344,3 +348,14 @@ work in reverse-briefness order while keeping one live roadmap block.
   - `RaftNetwork`/`RaftNetworkFactory`
   - core lifecycle calls (`Raft::new`, `initialize`, `client_write`, `shutdown`)
 - Kept the doc intentionally minimal and version-bound for restart reliability.
+- Added a compile-time guard note: openraft 0.8 NodeId must be `Copy`, so external string IDs need adapter mapping.
+
+## Iteration 38 — Openraft runtime scaffold
+
+- Added feature-gated `openraft_runtime` module in `crates/ganglion-openraft` with:
+  - `GanglionRaftConfig` implementing `openraft::RaftTypeConfig` for 0.8.x compatibility.
+  - `MetadataRaftCommand` and `MetadataRaftResponse` app payload/response types.
+  - `default_raft_config(...)` helper that validates and returns an `Arc<openraft::Config>`.
+- Exported the runtime module from `ganglion-openraft/src/lib.rs` via `pub` re-exports when `openraft` feature is enabled.
+- Reworked `OPENRAFT_SURVIVAL_CONTEXT.md` into a compact, restart-oriented one-pager for 0.8.9.
+- Validation update: `cargo test -p ganglion-openraft --features openraft --no-run` + `cargo test -p ganglion-openraft` both pass.

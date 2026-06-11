@@ -1,96 +1,83 @@
-# OpenRaft 0.8.9 Survival Sheet
+# OpenRaft 0.8.9 Survival Context
 
-Open this file first after context loss. Then open only the listed source files.
+Open this first when context is compacted.
+Read files in this order and only consult the sections below.
 
-## Signature anchors
+## 0) Version anchors
 
-- `.../openraft-0.8.9/src/raft.rs`
-- `.../openraft-0.8.9/src/storage/v2.rs`
-- `.../openraft-0.8.9/src/storage/mod.rs`
-- `.../openraft-0.8.9/src/network/network.rs`
-- `.../openraft-0.8.9/src/network/factory.rs`
-- `.../openraft-0.8.9/src/testing/suite.rs`
-- `.../openraft-0.8.9/src/node.rs`
-- `.../openraft-0.8.9/src/docs/getting_started/getting-started.md` (design notes only)
+Primary source: `openraft-0.8.9` cache under Rust cargo registry.
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/raft.rs`
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/storage/v2.rs`
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/storage/mod.rs`
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/network/network.rs`
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/network/factory.rs`
+- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/testing/suite.rs`
 
-Keep `~/code/temp/openraft` as reference for ideas, not ABI/signature source of truth (`0.10.0-alpha.21`).
+Reference for patterns and transport wiring (local clone; current clone is newer than 0.8.x, so only use as design guidance):
+- `/home/george/code/temp/openraft/examples/raft-kv-memstore/src/lib.rs`
+- `/home/george/code/temp/openraft/examples/raft-kv-memstore/src/store/mod.rs`
+- `/home/george/code/temp/openraft/examples/raft-kv-rocksdb/src/lib.rs`
+- `/home/george/code/temp/openraft/examples/raft-kv-memstore/src/test.rs`
 
-## Required type surface
+## 1) Critical constraints for this repo
 
-```rust
-impl openraft::RaftTypeConfig for TypeConfig {
-    type D: AppData;
-    type R: AppDataResponse;
-    type NodeId: NodeId;
-    type Node: Node; // usually `BasicNode { addr: String }`
-    type Entry: RaftEntry<Self::NodeId, Self::Node> + FromAppData<Self::D>;
-    type SnapshotData: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static;
-}
-```
+- `NodeId` in openraft 0.8 must be copyable (`u64` is the safest path).
+- This crate currently depends on `openraft = "0.8"` with `storage-v2` + `serde`.
+- Use `openraft::declare_raft_types!` only after defining all required associated types.
 
-Use `openraft::declare_raft_types!(pub TypeConfig: D = ..., R = ..., NodeId = ..., Node = ..., Entry = ..., SnapshotData = ...);` if available.
+## 2) Minimum API surface for first run
 
-## API you must keep stable in `ganglion-openraft`
+### Type config
 
-### Raft API
+- `RaftTypeConfig` requires all of:
+  - `D: AppData`
+  - `R: AppDataResponse`
+  - `NodeId: NodeId` (copyable)
+  - `Node: Node`
+  - `Entry: RaftEntry<NodeId, Node> + FromAppData<D>`
+  - `SnapshotData: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static`
 
-From `raft.rs`:
-- `Raft::new(id, config, network_factory, log_store, state_machine).await`
+### Storage traits (`storage-v2`)
+
+- `RaftLogReader<C>`
+  - `get_log_state(&mut self)`
+  - `try_get_log_entries(range)`
+- `RaftLogStorage<C>`
+  - `get_log_reader()`
+  - `save_vote()`
+  - `read_vote()`
+  - `append(entries, callback)`
+  - `truncate(log_id)`
+  - `purge(log_id)`
+- `RaftStateMachine<C>`
+  - `applied_state()`
+  - `apply(entries)`
+  - `get_snapshot_builder()`
+  - `begin_receiving_snapshot()`
+  - `install_snapshot(meta, snapshot)`
+  - `get_current_snapshot()`
+- `RaftSnapshotBuilder<C>`
+  - `build_snapshot()`
+
+### Network traits
+
+- `RaftNetwork<C>`
+  - `append_entries(rpc, option)`
+  - `vote(rpc, option)`
+  - `install_snapshot(rpc, option)`
+- `RaftNetworkFactory<C>`
+  - `new_client(target, node) -> Self::Network`
+
+### Runtime calls used by bootstrap/control
+
+- `Raft::new(id, config, network, log_store, state_machine).await`
 - `initialize(members)`
-- `client_write(app_data)`
-- `append_entries(rpc)`
-- `vote(rpc)`
-- `install_snapshot(rpc)`
-- `add_learner(id, node, blocking)`
-- `change_membership(members, retain)`
-- `current_leader() -> Option<NodeId>`
-- `is_leader()`
+- `client_write(payload)`
+- `append_entries`, `vote`, `install_snapshot`
+- `add_learner`, `change_membership`
+- `current_leader`, `is_leader`
 - `shutdown().await`
 
-`Raft` is `Clone` in spirit through `Arc` internals; operations return `RaftError`/`Raft::ClientWriteResponse` style results.
+### Contract test
 
-### Storage v2
-
-From `storage/v2.rs` and `storage/mod.rs`:
-
-`RaftLogReader`:
-- `get_log_state(&mut self) -> Result<LogState<C>, StorageError<NodeId>>`
-- `try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send + Sync>(&mut self, range: RB)`
-
-`RaftLogStorage`:
-- `type LogReader: RaftLogReader<C>`
-- `get_log_reader(&mut self) -> Self::LogReader`
-- `save_vote(&mut self, vote: &Vote<NodeId>)`
-- `read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>>`
-- `append<I>(&mut self, entries: I, callback: LogFlushed<NodeId>)`
-- `truncate(log_id: LogId<NodeId>)`
-- `purge(log_id: LogId<NodeId>)`
-
-`RaftStateMachine`:
-- `applied_state(&mut self) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, Node>), StorageError<NodeId>>`
-- `apply<I>(&mut self, entries: I) -> Result<Vec<R>, StorageError<NodeId>>`
-- `get_snapshot_builder(&mut self) -> Self::SnapshotBuilder`
-- `begin_receiving_snapshot(&mut self) -> Result<Box<SnapshotData>, StorageError<NodeId>>`
-- `install_snapshot(&meta, snapshot)`
-- `get_current_snapshot(&mut self) -> Result<Option<Snapshot<C>>, StorageError<NodeId>>`
-
-`RaftSnapshotBuilder`:
-- `build_snapshot(&mut self) -> Result<Snapshot<C>, StorageError<NodeId>>`
-
-## Network contracts
-
-From `network/network.rs`:
-- `append_entries(rpc, option: RPCOption)`
-- `vote(rpc, option: RPCOption)`
-- `install_snapshot(rpc, option: RPCOption)`
-- optional override: `backoff(&self) -> Backoff`
-
-From `network/factory.rs`:
-- `type Network: RaftNetwork<C>`
-- `new_client(&mut self, target: NodeId, node: &Node) -> Network`
-
-## Recovery/validation
-
-- `openraft::testing::Suite::test_all(builder)` is the official local storage/state-machine contract check.
-- In this repo we should keep the adapter behind `cfg(feature = "openraft")` and maintain parity checks before removing the feature.
-- A node shutdown path uses `Raft::shutdown()`. Background/process hangs should be treated as external orchestration first (separate long-running invocations).
+- Run through `openraft::testing::Suite::test_all(builder)` for storage + state machine contract checks.

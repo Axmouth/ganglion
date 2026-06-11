@@ -9,6 +9,9 @@ use ganglion_storage::{
     MetadataLogError,
 };
 
+#[cfg(feature = "openraft")]
+mod openraft_runtime;
+
 /// A narrow error surface for the initial adapter scaffold.
 #[derive(Debug, Clone)]
 pub enum OpenraftAdapterError {
@@ -743,6 +746,9 @@ impl InMemoryMetadataNodeBuilder {
 
 /// Simple planner export for convenience.
 pub use ganglion_core::DeterministicPartitionPlacement;
+
+#[cfg(feature = "openraft")]
+pub use openraft_runtime::*;
 
 #[cfg(test)]
 mod tests {
