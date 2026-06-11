@@ -299,3 +299,13 @@ work in reverse-briefness order while keeping one live roadmap block.
   - least-loaded balancing under empty and non-zero load conditions.
 - Reworked `.gitignore` with additional rust-native artifact patterns (`*.dll`, `*.dylib`, `*.rlib`, etc.).
 - Updated `API.md` and active plan/refinement notes to track pluggable strategy surface as implemented.
+
+## Iteration 33 — Openraft context survival doc
+
+- Added `OPENRAFT_SURVIVAL_CONTEXT.md` with version-guarded openraft touchpoints needed for future openraft integration.
+- Captured minimum trait surfaces and key example source files in one place:
+  - type config + payload requirements,
+  - `RaftLogReader`/`RaftLogStorage` implementation surface,
+  - `RaftStateMachine` lifecycle methods,
+  - `RaftNetwork`/`RaftNetworkFactory` wiring and bootstrap lifecycle calls (`Raft::new`, `initialize`, `client_write`, `metrics`, `shutdown`).
+- Explicitly documented the current crate/version mismatch (`openraft = "0.8"` vs local temp clone `0.10.0-alpha.21`) so the next cycle does not drift across API versions.
