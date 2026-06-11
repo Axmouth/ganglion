@@ -70,9 +70,13 @@ provide, in priority order:
 
 ## Medium-term roadmap
 
-1. Membership change/learner flows on `RaftMetadataNode` (`add_learner`, `change_membership`).
-2. Epoch/fencing surface for assignments (schema design first; user decision).
+1. DONE: membership change/learner flows on `RaftMetadataNode` (`add_learner`, `change_membership`).
+2. Epoch/fencing: schema already aligned (assignment `epoch` maps 1:1 to fibril — spike-verified).
+   Remaining work is controller-side epoch issuance helpers (increment-on-owner-change, CAS-style
+   guarded proposals).
 3. Durability telemetry around append/clear/truncate and startup recovery outcomes.
+4. Promote the `fibril-coordination-ganglion` spike toward real wiring when fibril is ready
+   (broker construction path, multi-node bootstrap config).
 
 ## Long-term roadmap
 

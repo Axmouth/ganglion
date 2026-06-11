@@ -17,6 +17,11 @@ mod network;
 mod node;
 mod storage;
 
+/// Re-export of the underlying raft crate so consumers can name trait bounds
+/// (`openraft::storage::RaftLogStorage`), `BasicNode`, `Config`, etc. without
+/// adding their own version-matched openraft dependency.
+pub use openraft;
+
 pub use durable::FileRaftLogStore;
 pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
 pub use node::RaftMetadataNode;

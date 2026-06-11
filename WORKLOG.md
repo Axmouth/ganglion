@@ -517,3 +517,26 @@ work in reverse-briefness order while keeping one live roadmap block.
   exists, pre-election restore is within the configured tail bound, and WAL tail re-commit
   recovers the exact final generation. Stable across repeated runs.
 - Next: fibril integration spike (user-approved option 3).
+
+## Iteration 47 — Fibril integration spike (cross-repo)
+
+- Added `fibril-coordination-ganglion` spike crate in the fibril workspace (fibril commit
+  `7b5a95b`): `GanglionCoordination<LS>` implements fibril's sync `Coordination` trait backed by
+  a `RaftMetadataNode`, with a forwarder task bridging ganglion's committed-snapshot watch into
+  the fibril-side `watch::Receiver`.
+- Ganglion-side enabler: `ganglion-openraft` now re-exports the `openraft` crate so consumers can
+  name trait bounds (`openraft::storage::RaftLogStorage`) and `BasicNode` without their own
+  version-matched dependency.
+- Spike findings (these resolve open plan questions):
+  - **Type models are already aligned**: snapshot mapping is lossless both ways — queue identity ↔
+    `ResourceIdentity` under a `fibril/queue` namespace, socket addrs ↔ endpoint strings,
+    durability variants identical, and **assignment `epoch` exists on both sides and maps 1:1**.
+  - The epoch/fencing roadmap item therefore shrinks to controller-side epoch issuance (who
+    increments, CAS semantics) — not a schema change.
+  - Raft `u64` node ids stay cleanly decoupled from fibril string node ids (transport concern).
+  - The async/sync decision holds up: reads are fully sync via the bridged watch; only proposals
+    are async, matching fibril's controller-loop model.
+- Tests in the spike: lossless mapping roundtrip; full propose → consensus commit → watch →
+  `owns_queue`/`owner_for`/`assignment_for`/epoch path against a real raft node; post-consensus
+  stale-generation rejection. Both pass; fibril workspace builds green.
+- Spike is deliberately not wired into the broker binary (etcd/static remain fibril's v1 path).
