@@ -8,6 +8,8 @@ use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 
 use ganglion_core::CoordinationSnapshot;
+use tokio::sync::watch;
+
 use openraft::async_trait::async_trait;
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine};
 use openraft::{
@@ -114,9 +116,24 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
 }
 
 /// Shared in-memory state machine holding the committed [`CoordinationSnapshot`].
-#[derive(Debug, Clone, Default)]
+///
+/// Every committed change is also published on a `watch` channel so sync
+/// consumers (fibril's `Coordination::watch()` shape) can observe the
+/// committed state without touching raft.
+#[derive(Debug, Clone)]
 pub struct GanglionStateMachine {
     inner: Arc<Mutex<StateMachineInner>>,
+    committed_tx: Arc<watch::Sender<CoordinationSnapshot>>,
+}
+
+impl Default for GanglionStateMachine {
+    fn default() -> Self {
+        let (committed_tx, _rx) = watch::channel(CoordinationSnapshot::default());
+        Self {
+            inner: Arc::default(),
+            committed_tx: Arc::new(committed_tx),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -143,6 +160,14 @@ impl GanglionStateMachine {
     /// Last applied raft log id, if any.
     pub fn last_applied(&self) -> Option<LogId<NodeId>> {
         self.inner.lock().unwrap().last_applied
+    }
+
+    /// Subscribe to committed snapshot updates.
+    ///
+    /// The receiver always holds the latest committed snapshot; only accepted
+    /// state changes are published (rejected stale writes are not).
+    pub fn watch_committed(&self) -> watch::Receiver<CoordinationSnapshot> {
+        self.committed_tx.subscribe()
     }
 }
 
@@ -196,6 +221,7 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
     {
         let mut inner = self.inner.lock().unwrap();
         let mut replies = Vec::new();
+        let mut state_changed = false;
 
         for entry in entries {
             inner.last_applied = Some(entry.log_id);
@@ -209,6 +235,7 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                         false
                     } else {
                         inner.state = snapshot;
+                        state_changed = true;
                         true
                     }
                 }
@@ -221,6 +248,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                 accepted,
                 snapshot: inner.state.clone(),
             });
+        }
+
+        if state_changed {
+            self.committed_tx.send_replace(inner.state.clone());
         }
 
         Ok(replies)
@@ -258,6 +289,7 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
             meta: meta.clone(),
             data,
         });
+        self.committed_tx.send_replace(inner.state.clone());
         Ok(())
     }
 

@@ -119,6 +119,33 @@ This file tracks what each part of the current scaffolding is meant to do.
 - `OpenraftAdapterError::Storage`
   - New variant for storage failures from durability backends.
 
+### Openraft runtime (feature `openraft`)
+
+- `GanglionRaftConfig`
+  - `openraft::RaftTypeConfig` for the metadata raft group
+    (`NodeId = u64`, `Node = BasicNode`, `SnapshotData = Cursor<Vec<u8>>`).
+- `MetadataRaftCommand` / `MetadataRaftResponse`
+  - App payload (`ApplySnapshot(CoordinationSnapshot)`) and response
+    (`accepted: bool` + committed `snapshot`); stale generations come back
+    `accepted = false`, decided deterministically inside the replicated state machine.
+- `GanglionLogStore`
+  - In-memory `RaftLogReader` + `RaftLogStorage`; passes `openraft::testing::Suite`.
+- `GanglionStateMachine`
+  - `RaftStateMachine` + `RaftSnapshotBuilder`; holds the committed `CoordinationSnapshot`,
+    JSON snapshot build/install, and publishes committed state on a `tokio::sync::watch` channel
+    (`watch_committed()`).
+- `InProcessRouter` / `InProcessConnection`
+  - `RaftNetworkFactory` / `RaftNetwork` routing RPCs between same-process `Raft` handles;
+    `deregister` simulates unreachable peers.
+- `GanglionRaft`
+  - Concrete `Raft<GanglionRaftConfig, InProcessRouter, GanglionLogStore, GanglionStateMachine>` alias.
+- `RaftMetadataNode`
+  - Runtime node: `start`, `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`,
+    rejected stale commit → `StaleGeneration`), `committed_snapshot`, `watch_committed`,
+    leader/applied-index wait helpers, `shutdown`.
+- `default_raft_config()`
+  - Validated default `openraft::Config`.
+
 ## Storage crate (`ganglion-storage`)
 
 - `MetadataLog`
@@ -147,8 +174,8 @@ This file tracks what each part of the current scaffolding is meant to do.
 
 ## Planned next part
 
-- `ganglion-openraft` full Raft engine integration to replace current in-memory placeholder.
-- Optional transport/watch layer for snapshot notifications and controller handoff loops.
+- Durable raft storage: `MetadataLog`-backed log/vote persistence for the openraft runtime path.
+- Membership change/learner flows on `RaftMetadataNode`; wire transport beyond in-process.
 
 ## Coordination crate (`ganglion-coordination`)
 

@@ -100,6 +100,15 @@ impl RaftMetadataNode {
         self.state_machine.committed_snapshot()
     }
 
+    /// Watch stream of committed snapshots, updated as raft applies entries.
+    ///
+    /// This is the sync consumption surface: callers can read or await changes
+    /// without touching raft. Matches the `watch::Receiver<CoordinationSnapshot>`
+    /// shape fibril's `Coordination` trait expects.
+    pub fn watch_committed(&self) -> tokio::sync::watch::Receiver<CoordinationSnapshot> {
+        self.state_machine.watch_committed()
+    }
+
     pub fn node_id(&self) -> NodeId {
         self.id
     }
@@ -249,6 +258,21 @@ mod tests {
                 .expect("leader write should commit");
             assert!(response.accepted);
             assert_eq!(response.snapshot.generation, 1);
+
+            // A follower watch subscriber observes the committed snapshot.
+            let mut follower_watch = nodes
+                .iter()
+                .find(|node| node.node_id() != leader_id)
+                .expect("cluster has followers")
+                .watch_committed();
+            tokio::time::timeout(timeout, async {
+                while follower_watch.borrow_and_update().generation < 1 {
+                    follower_watch.changed().await.expect("watch should stay open");
+                }
+            })
+            .await
+            .expect("follower watch should observe the committed write");
+            assert_eq!(follower_watch.borrow().clone(), snapshot);
 
             // All nodes converge to the committed snapshot.
             let applied = leader

@@ -405,3 +405,18 @@ work in reverse-briefness order while keeping one live roadmap block.
   - fencing/epoch surface for assignments added as a medium-term schema-design item.
 - Open decision recorded in PLAN: async `MetadataConsensus` variant vs. async-only
   `RaftMetadataNode` API with sync watch reads.
+
+## Iteration 41 — Committed-snapshot watch publication
+
+- `GanglionStateMachine` now owns a `tokio::sync::watch` channel publishing the committed
+  `CoordinationSnapshot` on every accepted apply and on snapshot install (rejected stale writes
+  do not publish). Exposed as `watch_committed()` on both the state machine and `RaftMetadataNode`.
+- This is the sync consumption surface fibril's `Coordination::watch()` expects — short-term
+  roadmap item 1 done.
+- Gotcha captured in survival doc: must use `watch::Sender::send_replace`, not `send` — `send`
+  drops the value when no receivers exist yet, so late subscribers would read stale state
+  (manifested as a test timeout on the follower-watch assertion).
+- Cluster test extended: a follower-side watch subscriber observes the committed write.
+- `API.md` updated with the full feature-gated openraft runtime surface.
+- Next objective: durable raft storage (`MetadataLog`-backed log/vote persistence + restart
+  recovery through the raft path).

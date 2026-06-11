@@ -55,6 +55,9 @@ wraps `Raft<...>` and implements `MetadataConsensus`.
 - `install_snapshot` may hand you an empty cursor in edge paths — treat empty data as default state.
 - State machine `apply` must be infallible business-wise: rejections must be encoded in the response
   type (deterministic across replicas), never returned as `StorageError`.
+- Committed-snapshot publication uses `tokio::sync::watch`; use `send_replace`, NOT `send` —
+  `send` drops the value when no receiver exists yet, so late subscribers would miss the
+  latest committed state (cost a test-timeout to find).
 
 ## 3) Contract test wiring (storage)
 
