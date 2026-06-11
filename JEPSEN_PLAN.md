@@ -82,6 +82,9 @@ It is a roadmap artifact, not a time-based log.
 - The fallback set now includes `07-raft-runtime-failover.sh` covering the real openraft runtime path:
   election/replication/stale rejection, leader-loss re-election, partitioned-follower rejoin,
   durable WAL restart recovery, and the file-store contract suite.
+- The fallback set now includes `08-playground-smoke.sh`: scripted run of the cluster playground
+  (`scripts/cluster-playground.sh`) through a full lifecycle — write, kill, write-under-loss,
+  restart, add+promote, remove, final write — asserting each step's output and clean exit.
 
 ### Scenario artifact hardening (current)
 

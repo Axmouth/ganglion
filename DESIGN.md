@@ -156,7 +156,7 @@ Serializable on purpose: this exact JSON is what the fibril admin endpoint retur
 renders. Test: 3-node cluster topology agrees across nodes (same leader/voters) and updates after
 membership change.
 
-## Phase G3 — Cluster playground
+## Phase G3 — Cluster playground — DONE (iteration 51)
 
 - `crates/ganglion-openraft/examples/cluster_demo.rs` (feature `openraft`): N durable nodes
   (tempdir or `--data-dir`), in-process router, stdin command loop:

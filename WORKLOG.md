@@ -603,3 +603,18 @@ work in reverse-briefness order while keeping one live roadmap block.
     apply/build/install interleavings, then reload from disk must equal the last persisted
     snapshot point (state + watch), or default if never persisted.
 - 54 tests green on the openraft feature. Next: G3 cluster playground.
+
+## Iteration 51 — Phase G3: cluster playground
+
+- Added `examples/cluster_demo.rs` (feature-gated, no new deps, hand-rolled parsing): N durable
+  nodes in one process with commands `status` (topology + telemetry per node), `write <gen>`,
+  `kill`, `restart`, `add` (learner + promote), `remove`, `quit`; `--script "a; b; c"` gives a
+  non-interactive mode for CI.
+- Added `scripts/cluster-playground.sh` wrapper and `tests/jepsen/scenarios/08-playground-smoke.sh`
+  asserting a full scripted lifecycle (write → kill → write under loss → restart → add+promote →
+  remove → final write → clean exit). Verified end-to-end: restarted node resumes from its data
+  dir and catches up; membership changes propagate to every node's topology view.
+- Path gotcha: scenario scripts' `cd ../..` lands in `tests/`, not the repo root (cargo tolerates
+  it; script paths don't) — scenario 08 uses `../../..`.
+- Ganglion phases G1–G3 from DESIGN.md are complete. Next: fibril-side F1 (provider contract
+  suite) onward.

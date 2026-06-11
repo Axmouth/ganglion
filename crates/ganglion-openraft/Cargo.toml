@@ -19,6 +19,10 @@ proptest = "1"
 default = []
 openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json"]
 
+[[example]]
+name = "cluster_demo"
+required-features = ["openraft"]
+
 # openraft's declare_raft_types! macro expands `cfg(feature = "serde")` checks
 # into this crate, which doesn't define that feature name.
 [lints.rust]
