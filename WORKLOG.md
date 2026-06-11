@@ -324,3 +324,13 @@ work in reverse-briefness order while keeping one live roadmap block.
   compile-time API signatures for `openraft = 0.8.9`.
 - Kept the document focused on direct dependency anchors and removed non-essential historical notes
   to support fast context recovery.
+
+## Iteration 36 — Fast-context openraft survival note
+
+- Finalized `OPENRAFT_SURVIVAL_CONTEXT.md` into a very compact API sheet containing only:
+  - the exact 0.8.9 files/entrypoints to reopen,
+  - trait method list needed to build storage/state-machine/network adapters,
+  - minimal bootstrap sequence.
+- Added explicit version-bound warning that local `~/code/temp/openraft` docs/examples are newer and should
+  not be used as signature authority for this repo.
+- Committed the update as `a312533` with a stable recovery-oriented layout.
