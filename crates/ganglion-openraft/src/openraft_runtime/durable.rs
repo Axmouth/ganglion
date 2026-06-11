@@ -29,9 +29,13 @@ enum WalRecord {
     Vote(Vote<NodeId>),
     Entry(Entry<GanglionRaftConfig>),
     /// Remove entries with `index >= since`.
-    Truncate { since: u64 },
+    Truncate {
+        since: u64,
+    },
     /// Remove entries with `index <= upto.index` and remember the purge point.
-    Purge { upto: LogId<NodeId> },
+    Purge {
+        upto: LogId<NodeId>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -52,7 +56,13 @@ impl DurableState {
                 self.log.split_off(&since);
             }
             WalRecord::Purge { upto } => {
-                self.last_purged_log_id = Some(upto);
+                // Mirrors the runtime guard: purge points never move backwards.
+                if self
+                    .last_purged_log_id
+                    .is_none_or(|purged| upto.index > purged.index)
+                {
+                    self.last_purged_log_id = Some(upto);
+                }
                 let retained = self.log.split_off(&(upto.index + 1));
                 self.log = retained;
             }
@@ -80,8 +90,7 @@ impl FileRaftLogStore {
         let mut state = DurableState::default();
 
         if path.exists() {
-            let file = File::open(&path)
-                .map_err(|error| StorageIOError::read_logs(&error))?;
+            let file = File::open(&path).map_err(|error| StorageIOError::read_logs(&error))?;
             for (line_no, line) in BufReader::new(file).lines().enumerate() {
                 let line = line.map_err(|error| StorageIOError::read_logs(&error))?;
                 if line.trim().is_empty() {
@@ -127,12 +136,12 @@ impl FileRaftLogStore {
     /// Rewrite the WAL compacted to current state (used after purge).
     fn rewrite(&self, inner: &mut DurableInner) -> Result<(), StorageError<NodeId>> {
         let tmp_path = self.path.with_extension("tmp");
-        let mut tmp = File::create(&tmp_path)
-            .map_err(|error| StorageIOError::write_logs(&error))?;
+        let mut tmp =
+            File::create(&tmp_path).map_err(|error| StorageIOError::write_logs(&error))?;
 
         let mut write_line = |record: &WalRecord| -> Result<(), StorageError<NodeId>> {
-            let mut line = serde_json::to_vec(record)
-                .map_err(|error| StorageIOError::write_logs(&error))?;
+            let mut line =
+                serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
             line.push(b'\n');
             tmp.write_all(&line)
                 .map_err(|error| StorageIOError::write_logs(&error))?;
@@ -283,7 +292,14 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock().unwrap();
-        inner.state.last_purged_log_id = Some(log_id);
+        // Purge points never move backwards.
+        if inner
+            .state
+            .last_purged_log_id
+            .is_none_or(|purged| log_id.index > purged.index)
+        {
+            inner.state.last_purged_log_id = Some(log_id);
+        }
         let retained = inner.state.log.split_off(&(log_id.index + 1));
         inner.state.log = retained;
         self.rewrite(&mut inner)
@@ -319,10 +335,8 @@ mod tests {
     {
         async fn build(
             &self,
-        ) -> Result<
-            ((), FileRaftLogStore, super::super::GanglionStateMachine),
-            StorageError<NodeId>,
-        > {
+        ) -> Result<((), FileRaftLogStore, super::super::GanglionStateMachine), StorageError<NodeId>>
+        {
             let store = FileRaftLogStore::open(unique_wal_path("suite"))?;
             Ok(((), store, super::super::GanglionStateMachine::default()))
         }
@@ -401,5 +415,146 @@ mod tests {
         std::fs::write(&path, b"{not-a-record}\n").expect("write bad WAL");
         let result = FileRaftLogStore::open(&path);
         assert!(result.is_err(), "malformed WAL must fail strict replay");
+    }
+
+    mod fuzz {
+        use super::*;
+        use proptest::prelude::*;
+
+        #[derive(Debug, Clone)]
+        enum WalOp {
+            /// Append `count` entries continuing from the model's next index.
+            Append {
+                count: u8,
+            },
+            /// Truncate at `last_index - back` (skipped when the log is empty).
+            Truncate {
+                back: u8,
+            },
+            /// Purge up to `last_index - back` (skipped when the log is empty).
+            Purge {
+                back: u8,
+            },
+            Vote {
+                term: u64,
+            },
+        }
+
+        fn wal_op() -> impl Strategy<Value = WalOp> {
+            prop_oneof![
+                4 => (1u8..6).prop_map(|count| WalOp::Append { count }),
+                1 => (0u8..4).prop_map(|back| WalOp::Truncate { back }),
+                1 => (0u8..4).prop_map(|back| WalOp::Purge { back }),
+                1 => (1u64..6).prop_map(|term| WalOp::Vote { term }),
+            ]
+        }
+
+        fn make_entry(index: u64) -> Entry<GanglionRaftConfig> {
+            use super::super::super::MetadataRaftCommand;
+            use ganglion_core::CoordinationSnapshot;
+            use openraft::{CommittedLeaderId, EntryPayload};
+            Entry {
+                log_id: LogId::new(CommittedLeaderId::new(1, 0), index),
+                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(
+                    CoordinationSnapshot {
+                        generation: index,
+                        ..CoordinationSnapshot::default()
+                    },
+                )),
+            }
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(48))]
+
+            /// Any interleaving of append/truncate/purge/vote must survive a
+            /// reopen: the reopened store equals the in-memory model.
+            #[test]
+            fn fuzz_wal_reopen_matches_model(ops in proptest::collection::vec(wal_op(), 1..25)) {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("runtime");
+                rt.block_on(async {
+                    let path = unique_wal_path("fuzz");
+                    let mut store = FileRaftLogStore::open(&path).expect("open");
+                    let leader = openraft::CommittedLeaderId::new(1, 0);
+
+                    // Model state.
+                    let mut model_log: Vec<u64> = Vec::new();
+                    let mut model_vote: Option<Vote<NodeId>> = None;
+                    let mut model_purged: Option<u64> = None;
+                    let mut next_index = 1u64;
+
+                    for op in &ops {
+                        match op {
+                            WalOp::Append { count } => {
+                                let entries: Vec<_> = (0..*count)
+                                    .map(|_| {
+                                        let entry = make_entry(next_index);
+                                        model_log.push(next_index);
+                                        next_index += 1;
+                                        entry
+                                    })
+                                    .collect();
+                                store.append_entries(entries).expect("append");
+                            }
+                            WalOp::Truncate { back } => {
+                                if let Some(last) = model_log.last().copied() {
+                                    let since = last.saturating_sub(*back as u64).max(1);
+                                    store
+                                        .truncate(LogId::new(leader, since))
+                                        .await
+                                        .expect("truncate");
+                                    model_log.retain(|index| *index < since);
+                                }
+                            }
+                            WalOp::Purge { back } => {
+                                if let Some(last) = model_log.last().copied() {
+                                    let upto = last.saturating_sub(*back as u64).max(1);
+                                    store
+                                        .purge(LogId::new(leader, upto))
+                                        .await
+                                        .expect("purge");
+                                    model_log.retain(|index| *index > upto);
+                                    model_purged =
+                                        Some(model_purged.unwrap_or(0).max(upto));
+                                }
+                            }
+                            WalOp::Vote { term } => {
+                                let vote = Vote::new(*term, 1);
+                                store.save_vote(&vote).await.expect("vote");
+                                model_vote = Some(vote);
+                            }
+                        }
+                    }
+                    drop(store);
+
+                    let mut reopened = FileRaftLogStore::open(&path).expect("reopen");
+                    prop_assert_eq!(
+                        reopened.read_vote().await.expect("read vote"),
+                        model_vote
+                    );
+
+                    let state = reopened.get_log_state().await.expect("log state");
+                    let expected_purged =
+                        model_purged.map(|index| LogId::new(leader, index));
+                    let expected_last = model_log
+                        .last()
+                        .map(|index| LogId::new(leader, *index))
+                        .or(expected_purged);
+                    prop_assert_eq!(state.last_purged_log_id, expected_purged);
+                    prop_assert_eq!(state.last_log_id, expected_last);
+
+                    let entries = reopened
+                        .try_get_log_entries(..)
+                        .await
+                        .expect("read entries");
+                    let indexes: Vec<u64> =
+                        entries.iter().map(|entry| entry.log_id.index).collect();
+                    prop_assert_eq!(indexes, model_log);
+                    Ok(())
+                })?;
+            }
+        }
     }
 }

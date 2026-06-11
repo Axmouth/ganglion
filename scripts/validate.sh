@@ -7,6 +7,7 @@ RUN_FMT=true
 RUN_TESTS=true
 RUN_STORAGE_PARITY=true
 RUN_STARTUP_SMOKE=true
+RUN_RAFT_RUNTIME=true
 RUN_PROPT=true
 RUN_JEPSEN=true
 
@@ -15,6 +16,7 @@ SUMMARY_FMT="skipped"
 SUMMARY_TESTS="skipped"
 SUMMARY_STORAGE_PARITY="skipped"
 SUMMARY_STARTUP_SMOKE="skipped"
+SUMMARY_RAFT_RUNTIME="skipped"
 SUMMARY_PROPT="skipped"
 SUMMARY_JEPSEN="skipped"
 
@@ -28,6 +30,7 @@ Options:
   --skip-tests            skip cargo test --workspace --quiet
   --skip-storage-parity   skip storage parity + startup constructor smoke
   --skip-startup-smoke    skip persisted startup-entrypoint smoke check
+  --skip-raft-runtime     skip openraft runtime feature tests
   --skip-fuzz             skip scripts/proptest.sh run
   --skip-jepsen           skip tests/jepsen/run.sh all
   --jepsen-artifact-dir P artifacts directory for jepsen scenario logs
@@ -60,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-startup-smoke)
       RUN_STARTUP_SMOKE=false
+      shift
+      ;;
+    --skip-raft-runtime)
+      RUN_RAFT_RUNTIME=false
       shift
       ;;
     --skip-fuzz)
@@ -112,6 +119,12 @@ run_startup_smoke() {
   echo "validate: cargo test -p ganglion-openraft persisted_node_startup --quiet"
   cargo test -p ganglion-openraft persisted_node_startup --quiet
   SUMMARY_STARTUP_SMOKE="pass"
+}
+
+run_raft_runtime() {
+  echo "validate: cargo test -p ganglion-openraft --features openraft --quiet"
+  cargo test -p ganglion-openraft --features openraft --quiet
+  SUMMARY_RAFT_RUNTIME="pass"
 }
 
 run_proptest() {
@@ -232,6 +245,8 @@ write_summary() {
     --arg result_storage_parity "$SUMMARY_STORAGE_PARITY" \
     --argjson startup_smoke_requested "$RUN_STARTUP_SMOKE" \
     --arg result_startup_smoke "$SUMMARY_STARTUP_SMOKE" \
+    --argjson raft_runtime_requested "$RUN_RAFT_RUNTIME" \
+    --arg result_raft_runtime "$SUMMARY_RAFT_RUNTIME" \
     --argjson proptest_requested "$RUN_PROPT" \
     --arg result_proptest "$SUMMARY_PROPT" \
     --argjson jepsen_requested "$RUN_JEPSEN" \
@@ -277,6 +292,10 @@ write_summary() {
           "requested": $startup_smoke_requested,
           "result": $result_startup_smoke
         },
+        "raft_runtime": {
+          "requested": $raft_runtime_requested,
+          "result": $result_raft_runtime
+        },
         "proptest": {
           "requested": $proptest_requested,
           "result": $result_proptest
@@ -310,6 +329,10 @@ if [[ "$RUN_STARTUP_SMOKE" == true ]]; then
   run_startup_smoke
 fi
 
+if [[ "$RUN_RAFT_RUNTIME" == true ]]; then
+  run_raft_runtime
+fi
+
 if [[ "$RUN_PROPT" == true ]]; then
   run_proptest
 fi
@@ -341,6 +364,11 @@ fi
 
 if [[ "$RUN_STARTUP_SMOKE" == true && "$SUMMARY_STARTUP_SMOKE" != "pass" ]]; then
   echo "validate: startup smoke failed"
+  exit 1
+fi
+
+if [[ "$RUN_RAFT_RUNTIME" == true && "$SUMMARY_RAFT_RUNTIME" != "pass" ]]; then
+  echo "validate: raft runtime tests failed"
   exit 1
 fi
 

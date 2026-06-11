@@ -58,7 +58,11 @@ impl RaftLogReader<GanglionRaftConfig> for GanglionLogStore {
         range: RB,
     ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
         let inner = self.inner.lock().unwrap();
-        Ok(inner.log.range(range).map(|(_, entry)| entry.clone()).collect())
+        Ok(inner
+            .log
+            .range(range)
+            .map(|(_, entry)| entry.clone())
+            .collect())
     }
 }
 
@@ -108,7 +112,13 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock().unwrap();
-        inner.last_purged_log_id = Some(log_id);
+        // Purge points never move backwards.
+        if inner
+            .last_purged_log_id
+            .is_none_or(|purged| log_id.index > purged.index)
+        {
+            inner.last_purged_log_id = Some(log_id);
+        }
         let retained = inner.log.split_off(&(log_id.index + 1));
         inner.log = retained;
         Ok(())
@@ -214,7 +224,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         Ok((inner.last_applied, inner.last_membership.clone()))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> Result<Vec<MetadataRaftResponse>, StorageError<NodeId>>
+    async fn apply<I>(
+        &mut self,
+        entries: I,
+    ) -> Result<Vec<MetadataRaftResponse>, StorageError<NodeId>>
     where
         I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
         I::IntoIter: Send,
@@ -276,9 +289,8 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         let state: CoordinationSnapshot = if data.is_empty() {
             CoordinationSnapshot::default()
         } else {
-            serde_json::from_slice(&data).map_err(|error| {
-                StorageIOError::read_snapshot(Some(meta.signature()), &error)
-            })?
+            serde_json::from_slice(&data)
+                .map_err(|error| StorageIOError::read_snapshot(Some(meta.signature()), &error))?
         };
 
         let mut inner = self.inner.lock().unwrap();
@@ -308,6 +320,7 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
 mod tests {
     use super::*;
     use openraft::testing::{StoreBuilder, Suite};
+    use proptest::prelude::*;
 
     struct InMemoryBuilder;
 
@@ -318,7 +331,11 @@ mod tests {
         async fn build(
             &self,
         ) -> Result<((), GanglionLogStore, GanglionStateMachine), StorageError<NodeId>> {
-            Ok(((), GanglionLogStore::default(), GanglionStateMachine::default()))
+            Ok((
+                (),
+                GanglionLogStore::default(),
+                GanglionStateMachine::default(),
+            ))
         }
     }
 
@@ -344,12 +361,11 @@ mod tests {
                 ..CoordinationSnapshot::default()
             };
 
-            let make_entry = |index: u64, snapshot: CoordinationSnapshot| Entry::<
-                GanglionRaftConfig,
-            > {
-                log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
-                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(snapshot)),
-            };
+            let make_entry =
+                |index: u64, snapshot: CoordinationSnapshot| Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                    payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(snapshot)),
+                };
 
             let replies = sm
                 .apply(vec![make_entry(1, fresh.clone()), make_entry(2, stale)])
@@ -362,5 +378,65 @@ mod tests {
             assert_eq!(sm.committed_snapshot(), fresh);
             assert_eq!(sm.last_applied().map(|id| id.index), Some(2));
         });
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// The state machine must behave exactly like a running-max model:
+        /// a command is accepted iff its generation >= the current state's,
+        /// regardless of batching; the final state is the last accepted command.
+        #[test]
+        fn fuzz_state_machine_matches_running_max_model(
+            generations in proptest::collection::vec(0u64..8, 1..40),
+            batch_split in 1usize..8,
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let mut sm = GanglionStateMachine::default();
+                let mut model_generation = 0u64;
+                let mut index = 0u64;
+                let leader = openraft::CommittedLeaderId::new(1, 0);
+
+                for chunk in generations.chunks(batch_split) {
+                    let entries: Vec<Entry<GanglionRaftConfig>> = chunk
+                        .iter()
+                        .map(|generation| {
+                            index += 1;
+                            Entry {
+                                log_id: LogId::new(leader, index),
+                                payload: EntryPayload::Normal(
+                                    MetadataRaftCommand::ApplySnapshot(CoordinationSnapshot {
+                                        generation: *generation,
+                                        ..CoordinationSnapshot::default()
+                                    }),
+                                ),
+                            }
+                        })
+                        .collect();
+
+                    let replies = sm.apply(entries).await.expect("apply never errors");
+                    for (generation, reply) in chunk.iter().zip(replies) {
+                        let expect_accept = *generation >= model_generation;
+                        prop_assert_eq!(reply.accepted, expect_accept);
+                        if expect_accept {
+                            model_generation = *generation;
+                        }
+                        prop_assert_eq!(reply.snapshot.generation, model_generation);
+                    }
+                }
+
+                prop_assert_eq!(sm.committed_snapshot().generation, model_generation);
+                prop_assert_eq!(sm.last_applied().map(|id| id.index), Some(index));
+                prop_assert_eq!(
+                    sm.watch_committed().borrow().generation,
+                    model_generation,
+                    "watch channel must hold the latest committed state"
+                );
+                Ok(())
+            })?;
+        }
     }
 }

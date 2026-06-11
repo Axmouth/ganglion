@@ -475,3 +475,22 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Next: medium-term item 2 is the epoch/fencing schema (needs design + user input when fibril
   integration starts); item 3 durability telemetry. Considering validation-hardening pass for the
   raft runtime path as the next concrete objective.
+
+## Iteration 45 — Raft-path validation hardening
+
+- Added `fuzz_state_machine_matches_running_max_model` (64 cases): the replicated state machine
+  must behave exactly like a running-max model across arbitrary generation sequences and batch
+  splits — accepted flags, per-reply snapshots, final state, last-applied index, and the watch
+  channel value all checked.
+- Added `fuzz_wal_reopen_matches_model` (48 cases): arbitrary append/truncate/purge/vote
+  interleavings against `FileRaftLogStore`, then reopen and compare vote, purge point, log state,
+  and entry indexes against an in-memory model.
+- **The WAL fuzz found a real bug on its first run**: a purge with a lower index than a prior
+  purge regressed `last_purged_log_id`. Fixed with a monotonic guard in `FileRaftLogStore::purge`,
+  WAL replay (`apply_record`), and the in-memory `GanglionLogStore::purge`. Proptest regression
+  seed committed under `proptest-regressions/`.
+- Added `raft_runtime` phase to `scripts/validate.sh` (`--skip-raft-runtime` to skip) running the
+  full openraft-feature test suite; wired into `validate-summary.json` and fail-hard gating.
+- Full one-shot `scripts/validate.sh` passes all seven phases (fmt, tests, storage_parity,
+  startup_smoke, raft_runtime, proptest, jepsen) — no hang observed on this broad run.
+- 50 tests green on the openraft feature; workspace remains green without it.

@@ -24,10 +24,7 @@ type NodeId = u64;
 
 /// Map raft client-write/membership errors onto `MetadataConsensus` semantics.
 fn map_membership_error(
-    error: openraft::error::RaftError<
-        NodeId,
-        openraft::error::ClientWriteError<NodeId, BasicNode>,
-    >,
+    error: openraft::error::RaftError<NodeId, openraft::error::ClientWriteError<NodeId, BasicNode>>,
 ) -> OpenraftAdapterError {
     if error.forward_to_leader().is_some() {
         OpenraftAdapterError::NotLeader
@@ -263,10 +260,7 @@ mod tests {
             .collect()
     }
 
-    async fn start_cluster(
-        router: &InProcessRouter,
-        ids: &[NodeId],
-    ) -> Vec<RaftMetadataNode> {
+    async fn start_cluster(router: &InProcessRouter, ids: &[NodeId]) -> Vec<RaftMetadataNode> {
         let config = test_config();
         let mut nodes = Vec::new();
         for id in ids {
@@ -325,7 +319,10 @@ mod tests {
                 .watch_committed();
             tokio::time::timeout(timeout, async {
                 while follower_watch.borrow_and_update().generation < 1 {
-                    follower_watch.changed().await.expect("watch should stay open");
+                    follower_watch
+                        .changed()
+                        .await
+                        .expect("watch should stay open");
                 }
             })
             .await
@@ -614,11 +611,7 @@ mod tests {
                 .await
                 .expect("removal should commit");
             let metrics = leader.raft().metrics().borrow().clone();
-            let voters: Vec<NodeId> = metrics
-                .membership_config
-                .membership()
-                .voter_ids()
-                .collect();
+            let voters: Vec<NodeId> = metrics.membership_config.membership().voter_ids().collect();
             assert_eq!(voters, vec![2, 3, 4]);
 
             for node in nodes.iter().chain(std::iter::once(&joiner)) {

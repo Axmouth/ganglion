@@ -35,7 +35,11 @@ struct UnknownTarget(NodeId);
 
 impl std::fmt::Display for UnknownTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "node {} is not registered in the in-process router", self.0)
+        write!(
+            f,
+            "node {} is not registered in the in-process router",
+            self.0
+        )
     }
 }
 
@@ -139,8 +143,7 @@ where
         &mut self,
         rpc: AppendEntriesRequest<GanglionRaftConfig>,
         _option: RPCOption,
-    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>>
-    {
+    ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, BasicNode, RaftError<NodeId>>> {
         let raft = self.target_raft()?;
         raft.append_entries(rpc)
             .await
