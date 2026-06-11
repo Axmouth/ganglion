@@ -79,6 +79,9 @@ It is a roadmap artifact, not a time-based log.
 - This keeps invariant coverage active in non-Clojure environments while keeping the future Jepsen hook in place.
 - The fallback set now includes `06-persistence-backend-parity.sh` to validate storage parity and startup tails in one persistence scenario.
 - That scenario now also exercises explicit restart/failover ordering, including stale-term rejection after a higher-term failover write.
+- The fallback set now includes `07-raft-runtime-failover.sh` covering the real openraft runtime path:
+  election/replication/stale rejection, leader-loss re-election, partitioned-follower rejoin,
+  durable WAL restart recovery, and the file-store contract suite.
 
 ### Scenario artifact hardening (current)
 

@@ -333,6 +333,166 @@ mod tests {
     }
 
     #[test]
+    fn leader_loss_triggers_reelection_and_writes_continue() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let router = InProcessRouter::new();
+            let nodes = start_cluster(&router, &[1, 2, 3]).await;
+            let timeout = Duration::from_secs(10);
+
+            let first_leader = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("initial election");
+            let leader = nodes
+                .iter()
+                .find(|node| node.node_id() == first_leader)
+                .expect("leader handle");
+            leader
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("initial write");
+
+            // Kill the leader: unreachable to peers and shut down.
+            router.deregister(first_leader);
+            leader.shutdown().await.expect("leader shutdown");
+
+            let survivors: Vec<_> = nodes
+                .iter()
+                .filter(|node| node.node_id() != first_leader)
+                .collect();
+
+            // The two survivors hold quorum and elect a new leader.
+            let new_leader_id = tokio::time::timeout(timeout, async {
+                loop {
+                    for node in &survivors {
+                        if node.is_leader().await {
+                            return node.node_id();
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("survivors should elect a new leader");
+            assert_ne!(new_leader_id, first_leader);
+
+            // Writes continue under the new leader and reach both survivors.
+            let new_leader = survivors
+                .iter()
+                .find(|node| node.node_id() == new_leader_id)
+                .expect("new leader handle");
+            new_leader
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("post-failover write should commit");
+
+            for node in &survivors {
+                let mut watch = node.watch_committed();
+                tokio::time::timeout(timeout, async {
+                    while watch.borrow_and_update().generation < 2 {
+                        watch.changed().await.expect("watch open");
+                    }
+                })
+                .await
+                .expect("survivor should observe post-failover write");
+            }
+
+            for node in &survivors {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    #[test]
+    fn partitioned_follower_rejoins_and_catches_up() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let router = InProcessRouter::new();
+            let nodes = start_cluster(&router, &[1, 2, 3]).await;
+            let timeout = Duration::from_secs(10);
+
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("initial election");
+
+            let partitioned = nodes
+                .iter()
+                .find(|node| node.node_id() != leader_id)
+                .expect("a follower to partition");
+            let partitioned_id = partitioned.node_id();
+
+            // Partition the follower (inbound RPCs fail as Unreachable).
+            router.deregister(partitioned_id);
+
+            // Quorum of 2/3 still commits. The partitioned node may force term
+            // churn via vote requests, so retry on transient NotLeader.
+            let write = CoordinationSnapshot {
+                generation: 1,
+                ..CoordinationSnapshot::default()
+            };
+            tokio::time::timeout(timeout, async {
+                loop {
+                    let current = nodes[0]
+                        .wait_for_any_leader(timeout)
+                        .await
+                        .expect("quorum holds a leader");
+                    if current == partitioned_id {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                    let node = nodes
+                        .iter()
+                        .find(|node| node.node_id() == current)
+                        .expect("leader handle");
+                    match node.write_snapshot(write.clone()).await {
+                        Ok(_) => break,
+                        Err(OpenraftAdapterError::NotLeader) => {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        Err(other) => panic!("unexpected write failure: {other}"),
+                    }
+                }
+            })
+            .await
+            .expect("write should commit during partition");
+
+            // Heal the partition; the follower catches up.
+            router.register(partitioned_id, partitioned.raft().clone());
+            let mut watch = partitioned.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < 1 {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("rejoined follower should catch up");
+            assert_eq!(partitioned.committed_snapshot().generation, 1);
+
+            for node in &nodes {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    #[test]
     fn durable_node_recovers_committed_state_after_restart() {
         use super::super::FileRaftLogStore;
 

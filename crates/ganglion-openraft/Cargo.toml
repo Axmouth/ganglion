@@ -18,3 +18,8 @@ proptest = "1"
 [features]
 default = []
 openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json"]
+
+# openraft's declare_raft_types! macro expands `cfg(feature = "serde")` checks
+# into this crate, which doesn't define that feature name.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("serde"))'] }

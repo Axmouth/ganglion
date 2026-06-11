@@ -440,3 +440,20 @@ work in reverse-briefness order while keeping one live roadmap block.
   in-memory state machine recovers generation 3 through re-commit (observed via the watch).
 - Short-term roadmap items 1 and 2 are now done; item 3 (failure scenarios in Jepsen fallback
   inventory) is next.
+
+## Iteration 43 — Raft failure scenarios and Jepsen inventory wiring
+
+- Added two raft-runtime failure tests (verified non-flaky over 5 consecutive runs):
+  - `leader_loss_triggers_reelection_and_writes_continue`: leader deregistered + shut down;
+    the two survivors re-elect and post-failover writes replicate to both.
+  - `partitioned_follower_rejoins_and_catches_up`: follower deregistered (inbound RPCs become
+    `Unreachable`); quorum keeps committing (with retry tolerance for partition-induced term
+    churn); re-registering the follower lets it converge via its committed-snapshot watch.
+- Added `tests/jepsen/scenarios/07-raft-runtime-failover.sh` (auto-discovered by `run.sh`) running
+  the cluster/failover/partition/durable-restart tests plus the file-store contract suite;
+  scenario artifact verified via `run.sh scenario 07-raft-runtime-failover`.
+- Updated `JEPSEN_PLAN.md` fallback inventory.
+- Cleanup: silenced the openraft `declare_raft_types!` `unexpected_cfgs` warning via
+  `[lints.rust]` check-cfg in `Cargo.toml` (macro expands `cfg(feature = "serde")` into our crate).
+- All three short-term roadmap items are done. Next up (medium-term): membership change/learner
+  flows on `RaftMetadataNode`.
