@@ -125,15 +125,21 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
     }
 }
 
-/// Shared in-memory state machine holding the committed [`CoordinationSnapshot`].
+/// Shared state machine holding the committed [`CoordinationSnapshot`].
 ///
 /// Every committed change is also published on a `watch` channel so sync
 /// consumers (fibril's `Coordination::watch()` shape) can observe the
 /// committed state without touching raft.
+///
+/// With [`GanglionStateMachine::persistent`], built/installed snapshots are
+/// also written to disk, which bounds recovery: a restarted node loads the
+/// snapshot and only re-applies the short log tail behind it, and state
+/// survives log purges across full-cluster restarts.
 #[derive(Debug, Clone)]
 pub struct GanglionStateMachine {
     inner: Arc<Mutex<StateMachineInner>>,
     committed_tx: Arc<watch::Sender<CoordinationSnapshot>>,
+    snapshot_path: Option<Arc<std::path::PathBuf>>,
 }
 
 impl Default for GanglionStateMachine {
@@ -142,6 +148,7 @@ impl Default for GanglionStateMachine {
         Self {
             inner: Arc::default(),
             committed_tx: Arc::new(committed_tx),
+            snapshot_path: None,
         }
     }
 }
@@ -155,13 +162,74 @@ struct StateMachineInner {
     current_snapshot: Option<StoredSnapshot>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredSnapshot {
     meta: SnapshotMeta<NodeId, BasicNode>,
     data: Vec<u8>,
 }
 
 impl GanglionStateMachine {
+    /// Open a state machine that persists snapshots to `path`.
+    ///
+    /// If the file exists, committed state, last-applied id, and membership are
+    /// restored from it immediately.
+    pub fn persistent(path: impl Into<std::path::PathBuf>) -> Result<Self, StorageError<NodeId>> {
+        let path = path.into();
+        let machine = Self {
+            snapshot_path: Some(Arc::new(path.clone())),
+            ..Self::default()
+        };
+
+        if path.exists() {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| StorageIOError::read_snapshot(None, &error))?;
+            let stored: StoredSnapshot = serde_json::from_slice(&bytes)
+                .map_err(|error| StorageIOError::read_snapshot(None, &error))?;
+            let state: CoordinationSnapshot = if stored.data.is_empty() {
+                CoordinationSnapshot::default()
+            } else {
+                serde_json::from_slice(&stored.data)
+                    .map_err(|error| StorageIOError::read_snapshot(None, &error))?
+            };
+
+            let mut inner = machine.inner.lock().unwrap();
+            inner.last_applied = stored.meta.last_log_id;
+            inner.last_membership = stored.meta.last_membership.clone();
+            inner.state = state.clone();
+            inner.current_snapshot = Some(stored);
+            drop(inner);
+            machine.committed_tx.send_replace(state);
+        }
+
+        Ok(machine)
+    }
+
+    /// Atomically write the snapshot file: tmp + fsync + rename + parent-dir
+    /// fsync, so a crash leaves either the old or the new snapshot — never a
+    /// torn one — and the rename itself is durable.
+    fn persist_snapshot(&self, stored: &StoredSnapshot) -> Result<(), StorageError<NodeId>> {
+        let Some(path) = &self.snapshot_path else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(stored).map_err(|error| {
+            StorageIOError::write_snapshot(Some(stored.meta.signature()), &error)
+        })?;
+        let tmp_path = path.with_extension("tmp");
+        let write = || -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp_path)?;
+            file.write_all(&bytes)?;
+            file.sync_data()?;
+            drop(file);
+            std::fs::rename(&tmp_path, path.as_ref())?;
+            super::fsync_parent_dir(path)
+        };
+        write().map_err(|error| {
+            StorageIOError::write_snapshot(Some(stored.meta.signature()), &error)
+        })?;
+        Ok(())
+    }
+
     /// Current committed coordination snapshot.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.inner.lock().unwrap().state.clone()
@@ -200,10 +268,12 @@ impl RaftSnapshotBuilder<GanglionRaftConfig> for GanglionStateMachine {
             last_membership: inner.last_membership.clone(),
             snapshot_id,
         };
-        inner.current_snapshot = Some(StoredSnapshot {
+        let stored = StoredSnapshot {
             meta: meta.clone(),
             data: data.clone(),
-        });
+        };
+        self.persist_snapshot(&stored)?;
+        inner.current_snapshot = Some(stored);
 
         Ok(Snapshot {
             meta,
@@ -293,14 +363,17 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                 .map_err(|error| StorageIOError::read_snapshot(Some(meta.signature()), &error))?
         };
 
+        let stored = StoredSnapshot {
+            meta: meta.clone(),
+            data,
+        };
+        self.persist_snapshot(&stored)?;
+
         let mut inner = self.inner.lock().unwrap();
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();
         inner.state = state;
-        inner.current_snapshot = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data,
-        });
+        inner.current_snapshot = Some(stored);
         self.committed_tx.send_replace(inner.state.clone());
         Ok(())
     }

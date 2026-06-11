@@ -57,6 +57,29 @@ impl RaftMetadataNode<GanglionLogStore> {
     }
 }
 
+impl RaftMetadataNode<super::FileRaftLogStore> {
+    /// Start a fully durable node storing its WAL and snapshot under `dir`.
+    ///
+    /// Recovery is bounded: restart loads `snapshot.json` and replays only the
+    /// short WAL tail behind it (see `default_raft_config` thresholds), and
+    /// committed state survives log purges across full restarts.
+    pub async fn start_durable(
+        id: NodeId,
+        config: Arc<Config>,
+        router: &InProcessRouter<super::FileRaftLogStore>,
+        dir: impl AsRef<std::path::Path>,
+    ) -> Result<Self, OpenraftAdapterError> {
+        let dir = dir.as_ref();
+        std::fs::create_dir_all(dir)
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let log_store = super::FileRaftLogStore::open(dir.join("raft-wal.jsonl"))
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let state_machine = GanglionStateMachine::persistent(dir.join("snapshot.json"))
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        Self::start_with_storage(id, config, router, log_store, state_machine).await
+    }
+}
+
 impl<LS> RaftMetadataNode<LS>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
@@ -68,7 +91,24 @@ where
         router: &InProcessRouter<LS>,
         log_store: LS,
     ) -> Result<Self, OpenraftAdapterError> {
-        let state_machine = GanglionStateMachine::default();
+        Self::start_with_storage(
+            id,
+            config,
+            router,
+            log_store,
+            GanglionStateMachine::default(),
+        )
+        .await
+    }
+
+    /// Start a node over explicit log store and state machine instances.
+    pub async fn start_with_storage(
+        id: NodeId,
+        config: Arc<Config>,
+        router: &InProcessRouter<LS>,
+        log_store: LS,
+        state_machine: GanglionStateMachine,
+    ) -> Result<Self, OpenraftAdapterError> {
         let raft = Raft::new(id, config, router.clone(), log_store, state_machine.clone())
             .await
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
@@ -617,6 +657,120 @@ mod tests {
             for node in nodes.iter().chain(std::iter::once(&joiner)) {
                 node.shutdown().await.expect("shutdown");
             }
+        });
+    }
+
+    #[test]
+    fn durable_node_bounded_recovery_survives_purge_across_restart() {
+        use super::super::FileRaftLogStore;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let dir = std::env::temp_dir().join(format!(
+                "ganglion-bounded-recovery-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            ));
+            let timeout = Duration::from_secs(10);
+
+            // Aggressive snapshot/purge so the test exercises the bound cheaply.
+            let config = Arc::new(
+                Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 150,
+                    election_timeout_max: 300,
+                    snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(16),
+                    max_in_snapshot_log_to_keep: 4,
+                    ..Default::default()
+                }
+                .validate()
+                .expect("config"),
+            );
+
+            const WRITES: u64 = 100;
+            {
+                let router = InProcessRouter::<FileRaftLogStore>::new();
+                let node = RaftMetadataNode::start_durable(1, config.clone(), &router, &dir)
+                    .await
+                    .expect("durable node should start");
+                node.initialize(basic_members(&[1]))
+                    .await
+                    .expect("initialize");
+                node.wait_for_leader(1, timeout).await.expect("election");
+
+                for generation in 1..=WRITES {
+                    node.write_snapshot(CoordinationSnapshot {
+                        generation,
+                        ..CoordinationSnapshot::default()
+                    })
+                    .await
+                    .expect("write");
+                }
+
+                // Wait for snapshot+purge to actually trim the log.
+                node.raft()
+                    .wait(Some(timeout))
+                    .metrics(
+                        |metrics| metrics.snapshot.map(|id| id.index).unwrap_or(0) > WRITES / 2,
+                        "snapshot built",
+                    )
+                    .await
+                    .expect("snapshot should be built under aggressive policy");
+
+                node.shutdown().await.expect("shutdown");
+                router.deregister(1);
+            }
+
+            // The WAL must be bounded: far fewer surviving records than writes.
+            let wal_lines = std::fs::read_to_string(dir.join("raft-wal.jsonl"))
+                .expect("WAL exists")
+                .lines()
+                .count();
+            assert!(
+                wal_lines < 60,
+                "WAL should stay bounded after purge, found {wal_lines} records"
+            );
+            assert!(
+                dir.join("snapshot.json").exists(),
+                "persisted snapshot must exist"
+            );
+
+            // Full restart: state must come back even though the log was purged.
+            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let restarted = RaftMetadataNode::start_durable(1, config, &router, &dir)
+                .await
+                .expect("restart");
+            // Pre-election state equals the persisted snapshot — at most the
+            // short WAL tail (snapshot threshold + keep) behind the last write.
+            let pre_election = restarted.committed_snapshot().generation;
+            assert!(
+                pre_election >= WRITES - 16 - 4,
+                "snapshot restore must be within the configured tail bound, got {pre_election}"
+            );
+            restarted
+                .wait_for_leader(1, timeout)
+                .await
+                .expect("re-election");
+            // Re-committing the WAL tail recovers the full committed state.
+            let mut watch = restarted.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < WRITES {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("WAL tail replay should recover the final generation");
+            assert_eq!(restarted.committed_snapshot().generation, WRITES);
+
+            restarted.shutdown().await.expect("shutdown");
         });
     }
 

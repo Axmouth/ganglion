@@ -494,3 +494,26 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Full one-shot `scripts/validate.sh` passes all seven phases (fmt, tests, storage_parity,
   startup_smoke, raft_runtime, proptest, jepsen) — no hang observed on this broad run.
 - 50 tests green on the openraft feature; workspace remains green without it.
+
+## Iteration 46 — Bounded recovery and atomic snapshot persistence
+
+- USER DIRECTIVES: bound WAL recovery time; make snapshot updates as atomic as possible; then
+  proceed to the fibril integration spike.
+- Found and closed a durability hole: the state machine snapshot was memory-only, so log purge +
+  full restart would lose state up to the purge point (multi-node clusters recovered via leader
+  snapshot transfer, but single-node/full-cluster restarts would not).
+- Added `GanglionStateMachine::persistent(path)`: built/installed snapshots are persisted and
+  restored on open (state, last-applied, membership, current snapshot, watch value).
+- Atomicity hardening per user directive: snapshot writes and WAL compaction rewrites now do
+  tmp + fsync + rename + parent-directory fsync (`fsync_parent_dir`); newly created WALs fsync
+  their directory entry too. Crash leaves old-or-new file, never torn, and renames are durable.
+- Bounded recovery: `default_raft_config()` now sets `SnapshotPolicy::LogsSinceLast(256)` and
+  `max_in_snapshot_log_to_keep = 64` (exported as constants), so startup replay is snapshot-load
+  plus a short WAL tail. `FileRaftLogStore::open` self-compacts when dead records exceed 64.
+- Added `RaftMetadataNode::start_with_storage` (explicit SM) and
+  `start_durable(id, config, router, dir)` (WAL + snapshot under one directory).
+- Added `durable_node_bounded_recovery_survives_purge_across_restart`: 100 writes under an
+  aggressive snapshot policy; asserts the WAL stays bounded (<60 records), the snapshot file
+  exists, pre-election restore is within the configured tail bound, and WAL tail re-commit
+  recovers the exact final generation. Stable across repeated runs.
+- Next: fibril integration spike (user-approved option 3).

@@ -50,15 +50,42 @@ openraft::declare_raft_types!(
         SnapshotData = Cursor<Vec<u8>>
 );
 
-/// Build a validated openraft runtime config from sane defaults.
+/// Fsync the parent directory of `path` so a preceding rename is durable.
+///
+/// Crash-consistency: writing tmp + fsync + rename only guarantees the new
+/// file content; the directory entry swap itself needs a directory fsync to
+/// survive power loss on most filesystems.
+pub(crate) fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => std::path::Path::new("."),
+    };
+    std::fs::File::open(parent)?.sync_all()
+}
+
+/// Log entries between snapshots before a new snapshot is built.
+pub const SNAPSHOT_LOGS_SINCE_LAST: u64 = 256;
+/// In-snapshot log entries retained after a purge.
+pub const MAX_IN_SNAPSHOT_LOG_TO_KEEP: u64 = 64;
+
+/// Build a validated openraft runtime config tuned for the metadata workload.
+///
+/// Snapshot/purge thresholds are kept small so the durable WAL — and therefore
+/// startup replay — stays bounded at roughly
+/// `SNAPSHOT_LOGS_SINCE_LAST + MAX_IN_SNAPSHOT_LOG_TO_KEEP` entries: recovery
+/// loads the persisted snapshot and only re-applies the short log tail.
 ///
 /// Returns [`OpenraftAdapterError::Config`] if the resulting configuration fails
 /// openraft's own validation (e.g. inconsistent timeout ordering).
 pub fn default_raft_config() -> Result<std::sync::Arc<openraft::Config>, OpenraftAdapterError> {
-    openraft::Config::default()
-        .validate()
-        .map(std::sync::Arc::new)
-        .map_err(|error| OpenraftAdapterError::Config(error.to_string()))
+    openraft::Config {
+        snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(SNAPSHOT_LOGS_SINCE_LAST),
+        max_in_snapshot_log_to_keep: MAX_IN_SNAPSHOT_LOG_TO_KEEP,
+        ..openraft::Config::default()
+    }
+    .validate()
+    .map(std::sync::Arc::new)
+    .map_err(|error| OpenraftAdapterError::Config(error.to_string()))
 }
 
 #[cfg(test)]

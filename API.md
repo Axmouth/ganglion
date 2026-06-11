@@ -138,13 +138,18 @@ This file tracks what each part of the current scaffolding is meant to do.
   - `RaftStateMachine` + `RaftSnapshotBuilder`; holds the committed `CoordinationSnapshot`,
     JSON snapshot build/install, and publishes committed state on a `tokio::sync::watch` channel
     (`watch_committed()`).
+  - `GanglionStateMachine::persistent(path)`: snapshots are additionally written to disk
+    atomically (tmp + fsync + rename + parent-dir fsync) and restored on open — required for
+    state to survive log purges across full restarts, and what bounds recovery time.
 - `InProcessRouter<LS>` / `InProcessConnection<LS>`
   - `RaftNetworkFactory` / `RaftNetwork` routing RPCs between same-process `Raft` handles;
     generic over the log store (default `GanglionLogStore`); `deregister` simulates unreachable peers.
 - `GanglionRaftOf<LS>` / `GanglionRaft`
   - Raft handle aliases (generic / default in-memory).
 - `RaftMetadataNode<LS>`
-  - Runtime node: `start` (in-memory) / `start_with_store` (any log store, e.g. `FileRaftLogStore`),
+  - Runtime node: `start` (in-memory) / `start_with_store` / `start_with_storage` (explicit state
+    machine) / `start_durable(id, config, router, dir)` (WAL + persisted snapshot under `dir`;
+    bounded restart recovery),
     `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`, rejected stale commit →
     `StaleGeneration`), `committed_snapshot`, `watch_committed`, leader/applied-index wait helpers,
     `shutdown`. Durable restart: reopen the WAL and `start_with_store` again — do not re-`initialize`.
@@ -152,7 +157,9 @@ This file tracks what each part of the current scaffolding is meant to do.
     catch-up) and `change_membership(voters, retain)` (replaces the voter set; `retain` keeps
     demoted voters as learners). Both leader-only (`NotLeader` otherwise).
 - `default_raft_config()`
-  - Validated default `openraft::Config`.
+  - Validated `openraft::Config` tuned for the metadata workload: snapshots every
+    `SNAPSHOT_LOGS_SINCE_LAST` (256) entries, `MAX_IN_SNAPSHOT_LOG_TO_KEEP` (64) retained after
+    purge — this bounds WAL size and startup replay.
 
 ## Storage crate (`ganglion-storage`)
 

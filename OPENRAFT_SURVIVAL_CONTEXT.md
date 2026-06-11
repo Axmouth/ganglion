@@ -34,9 +34,17 @@ its signatures (e.g. `declare_raft_types` with `LeaderId`, `SnapshotDataOf`) do 
   `write_snapshot` (ForwardToLeader→NotLeader, rejected commit→StaleGeneration),
   `watch_committed`, wait helpers, `shutdown`. 3-node cluster + durable restart tests pass.
 - `openraft_runtime/durable.rs`: `FileRaftLogStore` — JSON-lines WAL (Vote/Entry/Truncate/Purge
-  records), strict replay on open, batched fsync appends, purge compacts via tmp-file rewrite.
-  Also passes `Suite::test_all`. State machine stays in-memory: openraft re-commits the log after
-  restart (single voter re-elects from persisted vote+membership-in-log; no re-initialize!).
+  records), strict replay on open, batched fsync appends, purge compacts via tmp-file rewrite,
+  open-time compaction when dead records exceed threshold (64). Purge points are monotonic
+  (fuzz-found bug). Also passes `Suite::test_all`.
+- Bounded recovery: `GanglionStateMachine::persistent(path)` persists built/installed snapshots
+  (atomic: tmp + fsync + rename + parent-dir fsync via `fsync_parent_dir`); restart loads the
+  snapshot pre-election, then re-commits only the WAL tail. `default_raft_config()` bounds the
+  tail: `SnapshotPolicy::LogsSinceLast(256)` + `max_in_snapshot_log_to_keep = 64`.
+  `RaftMetadataNode::start_durable(id, config, router, dir)` = WAL + snapshot under one dir.
+  WITHOUT the persistent SM, purge + full restart LOSES state (snapshot was memory-only) —
+  that's why durable deployments must use `start_durable`/`persistent`, not bare
+  `FileRaftLogStore` alone. Restart: never re-`initialize`.
 
 Still to build: membership change/learner flows, raft failure scenarios in Jepsen inventory,
 wire transport.

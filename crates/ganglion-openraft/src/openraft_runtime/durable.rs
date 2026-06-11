@@ -83,11 +83,19 @@ pub struct FileRaftLogStore {
 }
 
 impl FileRaftLogStore {
+    /// Dead WAL records tolerated before an open-time compaction rewrite.
+    const COMPACT_DEAD_RECORD_THRESHOLD: usize = 64;
+
     /// Open (or create) the WAL at `path` and replay it. Replay is strict:
     /// malformed records fail startup rather than risking divergent raft state.
+    ///
+    /// If replay encounters substantially more records than the live state
+    /// retains (superseded votes, truncated/purged entries), the WAL is
+    /// compacted immediately so the next startup replays a bounded file.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, StorageError<NodeId>> {
         let path = path.into();
         let mut state = DurableState::default();
+        let mut replayed_records = 0usize;
 
         if path.exists() {
             let file = File::open(&path).map_err(|error| StorageIOError::read_logs(&error))?;
@@ -103,19 +111,36 @@ impl FileRaftLogStore {
                     ))
                 })?;
                 state.apply_record(record);
+                replayed_records += 1;
             }
         }
 
+        let created = !path.exists();
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|error| StorageIOError::write_logs(&error))?;
+        if created {
+            // Make the new WAL's directory entry durable.
+            super::fsync_parent_dir(&path).map_err(|error| StorageIOError::write_logs(&error))?;
+        }
 
-        Ok(Self {
+        let live_records = state.log.len()
+            + usize::from(state.vote.is_some())
+            + usize::from(state.last_purged_log_id.is_some());
+        let needs_compaction =
+            replayed_records > live_records + Self::COMPACT_DEAD_RECORD_THRESHOLD;
+
+        let store = Self {
             path,
             inner: Arc::new(Mutex::new(DurableInner { state, file })),
-        })
+        };
+        if needs_compaction {
+            let mut inner = store.inner.lock().unwrap();
+            store.rewrite(&mut inner)?;
+        }
+        Ok(store)
     }
 
     fn write_record(
@@ -163,6 +188,7 @@ impl FileRaftLogStore {
 
         std::fs::rename(&tmp_path, &self.path)
             .map_err(|error| StorageIOError::write_logs(&error))?;
+        super::fsync_parent_dir(&self.path).map_err(|error| StorageIOError::write_logs(&error))?;
         inner.file = OpenOptions::new()
             .append(true)
             .open(&self.path)
