@@ -33,6 +33,22 @@ fn map_membership_error(
     }
 }
 
+/// Serializable view of the raft group as seen by one node.
+///
+/// This is the JSON contract consumed by topology CLIs and admin diagrams.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RaftTopology {
+    pub local_id: NodeId,
+    pub leader: Option<NodeId>,
+    pub voters: Vec<NodeId>,
+    pub learners: Vec<NodeId>,
+    /// Raft id → address (from `BasicNode.addr`).
+    pub nodes: BTreeMap<NodeId, String>,
+    pub last_applied_index: Option<u64>,
+    pub snapshot_index: Option<u64>,
+    pub committed_generation: u64,
+}
+
 /// One raft-backed metadata node living inside a process-local cluster.
 ///
 /// Generic over the raft log store: `GanglionLogStore` (in-memory, default) or
@@ -44,6 +60,7 @@ where
     id: NodeId,
     raft: GanglionRaftOf<LS>,
     state_machine: GanglionStateMachine,
+    log_telemetry: Option<Arc<super::StorageTelemetry>>,
 }
 
 impl RaftMetadataNode<GanglionLogStore> {
@@ -76,7 +93,11 @@ impl RaftMetadataNode<super::FileRaftLogStore> {
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
         let state_machine = GanglionStateMachine::persistent(dir.join("snapshot.json"))
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
-        Self::start_with_storage(id, config, router, log_store, state_machine).await
+        let log_telemetry = log_store.telemetry_handle();
+        let mut node =
+            Self::start_with_storage(id, config, router, log_store, state_machine).await?;
+        node.log_telemetry = Some(log_telemetry);
+        Ok(node)
     }
 }
 
@@ -117,6 +138,7 @@ where
             id,
             raft,
             state_machine,
+            log_telemetry: None,
         })
     }
 
@@ -319,6 +341,51 @@ where
             .map_err(map_membership_error)
     }
 
+    /// Serializable view of the raft group from this node's metrics.
+    ///
+    /// Sync and cheap: reads the metrics watch channel and the committed
+    /// snapshot. This JSON is the contract topology CLIs / admin UIs consume.
+    pub fn topology(&self) -> RaftTopology {
+        let metrics = self.raft.metrics().borrow().clone();
+        let membership = metrics.membership_config.membership().clone();
+        let voters: Vec<NodeId> = membership.voter_ids().collect();
+        let learners: Vec<NodeId> = membership.learner_ids().collect();
+        let nodes = membership
+            .nodes()
+            .map(|(id, node)| (*id, node.addr.clone()))
+            .collect();
+
+        RaftTopology {
+            local_id: self.id,
+            leader: metrics.current_leader,
+            voters,
+            learners,
+            nodes,
+            last_applied_index: metrics.last_applied.map(|id| id.index),
+            snapshot_index: metrics.snapshot.map(|id| id.index),
+            committed_generation: self.state_machine.committed_snapshot().generation,
+        }
+    }
+
+    /// Combined durability counters: state-machine snapshot persistence plus
+    /// (for durable nodes) WAL append/fsync/compaction/replay counts.
+    pub fn telemetry(&self) -> super::StorageTelemetrySnapshot {
+        let sm = self.state_machine.telemetry();
+        let Some(log) = &self.log_telemetry else {
+            return sm;
+        };
+        let log = log.snapshot();
+        super::StorageTelemetrySnapshot {
+            appended_records: log.appended_records,
+            appended_batches: log.appended_batches,
+            fsyncs: log.fsyncs,
+            compactions: log.compactions,
+            replayed_records_last_open: log.replayed_records_last_open,
+            snapshot_persists: sm.snapshot_persists,
+            snapshot_loads: sm.snapshot_loads,
+        }
+    }
+
     /// Access the raw raft handle for membership changes and metrics.
     pub fn raft(&self) -> &GanglionRaftOf<LS> {
         &self.raft
@@ -433,6 +500,18 @@ mod tests {
                     .await
                     .expect("follower should catch up");
                 assert_eq!(node.committed_snapshot(), snapshot);
+            }
+
+            // Topology agreement: every node reports the same leader, voters,
+            // and committed generation.
+            for node in &nodes {
+                let topology = node.topology();
+                assert_eq!(topology.local_id, node.node_id());
+                assert_eq!(topology.leader, Some(leader_id));
+                assert_eq!(topology.voters, vec![1, 2, 3]);
+                assert!(topology.learners.is_empty());
+                assert_eq!(topology.nodes.len(), 3);
+                assert_eq!(topology.committed_generation, 1);
             }
 
             // Stale generation is rejected after going through consensus.
@@ -817,9 +896,10 @@ mod tests {
                 .change_membership([2, 3, 4], false)
                 .await
                 .expect("removal should commit");
-            let metrics = leader.raft().metrics().borrow().clone();
-            let voters: Vec<NodeId> = metrics.membership_config.membership().voter_ids().collect();
-            assert_eq!(voters, vec![2, 3, 4]);
+            let topology = leader.topology();
+            assert_eq!(topology.voters, vec![2, 3, 4]);
+            assert!(topology.learners.is_empty());
+            assert!(topology.nodes.contains_key(&4));
 
             for node in nodes.iter().chain(std::iter::once(&joiner)) {
                 node.shutdown().await.expect("shutdown");
@@ -892,6 +972,13 @@ mod tests {
                     .await
                     .expect("snapshot should be built under aggressive policy");
 
+                // Durability telemetry moved with the workload.
+                let telemetry = node.telemetry();
+                assert!(telemetry.appended_records >= WRITES);
+                assert!(telemetry.fsyncs >= WRITES);
+                assert!(telemetry.compactions >= 1, "purge should compact the WAL");
+                assert!(telemetry.snapshot_persists >= 1);
+
                 node.shutdown().await.expect("shutdown");
                 router.deregister(1);
             }
@@ -915,6 +1002,10 @@ mod tests {
             let restarted = RaftMetadataNode::start_durable(1, config, &router, &dir)
                 .await
                 .expect("restart");
+            // Restart telemetry: bounded replay and a snapshot load.
+            let restart_telemetry = restarted.telemetry();
+            assert!(restart_telemetry.replayed_records_last_open < 60);
+            assert_eq!(restart_telemetry.snapshot_loads, 1);
             // Pre-election state equals the persisted snapshot — at most the
             // short WAL tail (snapshot threshold + keep) behind the last write.
             let pre_election = restarted.committed_snapshot().generation;

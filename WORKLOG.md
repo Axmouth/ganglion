@@ -581,3 +581,25 @@ work in reverse-briefness order while keeping one live roadmap block.
   - `file_store_replays_pre_guarded_format_wal`: v1 WAL record encoding pinned as a literal
     fixture — breaking it means a WAL migration, not a fixture update.
 - fibril spike still green against the changed response type. Next: G2 (telemetry + RaftTopology).
+
+## Iteration 50 — Phase G2: durability telemetry + topology introspection
+
+- `StorageTelemetry`/`StorageTelemetrySnapshot` (plain atomics, no metrics-crate dep): appends,
+  batches, fsyncs, compactions, replay size on open, snapshot persists/loads. Exposed on
+  `FileRaftLogStore::telemetry()`, `GanglionStateMachine::telemetry()`, and aggregated on
+  `RaftMetadataNode::telemetry()` (durable nodes capture the WAL handle in `start_durable`).
+- `RaftTopology` (serde): local id, leader, voters, learners, raft-id→address map,
+  applied/snapshot indexes, committed generation — produced sync by
+  `RaftMetadataNode::topology()`. This is the JSON contract for fibril's `GET /topology`,
+  CLI rendering, and the admin diagram (DESIGN G2.2 / fibril F4).
+- Test updates: 3-node cluster asserts topology agreement on every node; membership test asserts
+  voters/learners through `topology()`; bounded-recovery test asserts telemetry movement
+  (appends ≥ writes, compaction after purge, snapshot persist, bounded replay + snapshot load
+  after restart).
+- USER DIRECTIVE (more fuzzing where apt) honored with two additions:
+  - WAL op-interleaving fuzz now also checks telemetry equals the model exactly
+    (appended records/batches, compaction count).
+  - New `fuzz_persistent_state_machine_reload_matches_last_persisted`: arbitrary
+    apply/build/install interleavings, then reload from disk must equal the last persisted
+    snapshot point (state + watch), or default if never persisted.
+- 54 tests green on the openraft feature. Next: G3 cluster playground.

@@ -20,7 +20,7 @@ use openraft::storage::{LogFlushed, RaftLogStorage};
 use openraft::{Entry, LogId, LogState, RaftLogReader, StorageError, StorageIOError, Vote};
 use serde::{Deserialize, Serialize};
 
-use super::GanglionRaftConfig;
+use super::{GanglionRaftConfig, StorageTelemetry, StorageTelemetrySnapshot};
 
 type NodeId = u64;
 
@@ -80,6 +80,7 @@ struct DurableInner {
 pub struct FileRaftLogStore {
     path: PathBuf,
     inner: Arc<Mutex<DurableInner>>,
+    telemetry: Arc<StorageTelemetry>,
 }
 
 impl FileRaftLogStore {
@@ -132,9 +133,16 @@ impl FileRaftLogStore {
         let needs_compaction =
             replayed_records > live_records + Self::COMPACT_DEAD_RECORD_THRESHOLD;
 
+        let telemetry = Arc::new(StorageTelemetry::default());
+        telemetry.replayed_records_last_open.store(
+            replayed_records as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         let store = Self {
             path,
             inner: Arc::new(Mutex::new(DurableInner { state, file })),
+            telemetry,
         };
         if needs_compaction {
             let mut inner = store.inner.lock().unwrap();
@@ -156,6 +164,16 @@ impl FileRaftLogStore {
             .and_then(|()| inner.file.sync_data())
             .map_err(|error| StorageIOError::write_logs(&error))?;
         Ok(())
+    }
+
+    /// Counter handle shared with `RaftMetadataNode::telemetry`.
+    pub fn telemetry_handle(&self) -> Arc<StorageTelemetry> {
+        Arc::clone(&self.telemetry)
+    }
+
+    /// Point-in-time durability counters.
+    pub fn telemetry(&self) -> StorageTelemetrySnapshot {
+        self.telemetry.snapshot()
     }
 
     /// Rewrite the WAL compacted to current state (used after purge).
@@ -193,6 +211,9 @@ impl FileRaftLogStore {
             .append(true)
             .open(&self.path)
             .map_err(|error| StorageIOError::write_logs(&error))?;
+        use std::sync::atomic::Ordering::Relaxed;
+        self.telemetry.compactions.fetch_add(1, Relaxed);
+        self.telemetry.fsyncs.fetch_add(2, Relaxed); // tmp data + parent dir
         Ok(())
     }
 
@@ -220,6 +241,12 @@ impl FileRaftLogStore {
             .write_all(&batch)
             .and_then(|()| inner.file.sync_data())
             .map_err(|error| StorageIOError::write_logs(&error))?;
+        use std::sync::atomic::Ordering::Relaxed;
+        self.telemetry
+            .appended_records
+            .fetch_add(staged.len() as u64, Relaxed);
+        self.telemetry.appended_batches.fetch_add(1, Relaxed);
+        self.telemetry.fsyncs.fetch_add(1, Relaxed);
         for entry in staged {
             inner.state.log.insert(entry.log_id.index, entry);
         }
@@ -272,6 +299,9 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock().unwrap();
         Self::write_record(&mut inner, &WalRecord::Vote(*vote))?;
+        self.telemetry
+            .fsyncs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         inner.state.vote = Some(*vote);
         Ok(())
     }
@@ -540,6 +570,9 @@ mod tests {
                     let mut model_vote: Option<Vote<NodeId>> = None;
                     let mut model_purged: Option<u64> = None;
                     let mut next_index = 1u64;
+                    let mut model_appended = 0u64;
+                    let mut model_batches = 0u64;
+                    let mut model_compactions = 0u64;
 
                     for op in &ops {
                         match op {
@@ -552,6 +585,8 @@ mod tests {
                                         entry
                                     })
                                     .collect();
+                                model_appended += entries.len() as u64;
+                                model_batches += 1;
                                 store.append_entries(entries).expect("append");
                             }
                             WalOp::Truncate { back } => {
@@ -571,6 +606,7 @@ mod tests {
                                         .purge(LogId::new(leader, upto))
                                         .await
                                         .expect("purge");
+                                    model_compactions += 1;
                                     model_log.retain(|index| *index > upto);
                                     model_purged =
                                         Some(model_purged.unwrap_or(0).max(upto));
@@ -583,6 +619,11 @@ mod tests {
                             }
                         }
                     }
+                    // Telemetry must match the model exactly.
+                    let telemetry = store.telemetry();
+                    prop_assert_eq!(telemetry.appended_records, model_appended);
+                    prop_assert_eq!(telemetry.appended_batches, model_batches);
+                    prop_assert_eq!(telemetry.compactions, model_compactions);
                     drop(store);
 
                     let mut reopened = FileRaftLogStore::open(&path).expect("reopen");

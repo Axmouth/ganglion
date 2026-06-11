@@ -24,7 +24,7 @@ pub use openraft;
 
 pub use durable::FileRaftLogStore;
 pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
-pub use node::RaftMetadataNode;
+pub use node::{RaftMetadataNode, RaftTopology};
 pub use storage::{GanglionLogStore, GanglionStateMachine};
 
 /// Application-level write submitted through `Raft::client_write`.
@@ -84,6 +84,48 @@ pub(crate) fn fsync_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
         _ => std::path::Path::new("."),
     };
     std::fs::File::open(parent)?.sync_all()
+}
+
+/// Shared atomic counters for durability-path observability.
+///
+/// Plain counters by design: consumers map them into their own metrics
+/// systems; ganglion takes no metrics-crate dependency.
+#[derive(Debug, Default)]
+pub struct StorageTelemetry {
+    pub(crate) appended_records: std::sync::atomic::AtomicU64,
+    pub(crate) appended_batches: std::sync::atomic::AtomicU64,
+    pub(crate) fsyncs: std::sync::atomic::AtomicU64,
+    pub(crate) compactions: std::sync::atomic::AtomicU64,
+    pub(crate) replayed_records_last_open: std::sync::atomic::AtomicU64,
+    pub(crate) snapshot_persists: std::sync::atomic::AtomicU64,
+    pub(crate) snapshot_loads: std::sync::atomic::AtomicU64,
+}
+
+/// Point-in-time copy of [`StorageTelemetry`].
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StorageTelemetrySnapshot {
+    pub appended_records: u64,
+    pub appended_batches: u64,
+    pub fsyncs: u64,
+    pub compactions: u64,
+    pub replayed_records_last_open: u64,
+    pub snapshot_persists: u64,
+    pub snapshot_loads: u64,
+}
+
+impl StorageTelemetry {
+    pub fn snapshot(&self) -> StorageTelemetrySnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        StorageTelemetrySnapshot {
+            appended_records: self.appended_records.load(Relaxed),
+            appended_batches: self.appended_batches.load(Relaxed),
+            fsyncs: self.fsyncs.load(Relaxed),
+            compactions: self.compactions.load(Relaxed),
+            replayed_records_last_open: self.replayed_records_last_open.load(Relaxed),
+            snapshot_persists: self.snapshot_persists.load(Relaxed),
+            snapshot_loads: self.snapshot_loads.load(Relaxed),
+        }
+    }
 }
 
 /// Log entries between snapshots before a new snapshot is built.

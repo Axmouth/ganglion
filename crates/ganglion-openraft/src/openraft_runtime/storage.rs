@@ -17,7 +17,10 @@ use openraft::{
     SnapshotMeta, StorageError, StorageIOError, StoredMembership, Vote,
 };
 
-use super::{GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection};
+use super::{
+    GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection,
+    StorageTelemetry, StorageTelemetrySnapshot,
+};
 
 type NodeId = u64;
 
@@ -140,6 +143,7 @@ pub struct GanglionStateMachine {
     inner: Arc<Mutex<StateMachineInner>>,
     committed_tx: Arc<watch::Sender<CoordinationSnapshot>>,
     snapshot_path: Option<Arc<std::path::PathBuf>>,
+    telemetry: Arc<StorageTelemetry>,
 }
 
 impl Default for GanglionStateMachine {
@@ -149,6 +153,7 @@ impl Default for GanglionStateMachine {
             inner: Arc::default(),
             committed_tx: Arc::new(committed_tx),
             snapshot_path: None,
+            telemetry: Arc::default(),
         }
     }
 }
@@ -199,9 +204,23 @@ impl GanglionStateMachine {
             inner.current_snapshot = Some(stored);
             drop(inner);
             machine.committed_tx.send_replace(state);
+            machine
+                .telemetry
+                .snapshot_loads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
 
         Ok(machine)
+    }
+
+    /// Counter handle shared with `RaftMetadataNode::telemetry`.
+    pub fn telemetry_handle(&self) -> Arc<StorageTelemetry> {
+        Arc::clone(&self.telemetry)
+    }
+
+    /// Point-in-time snapshot persistence counters.
+    pub fn telemetry(&self) -> StorageTelemetrySnapshot {
+        self.telemetry.snapshot()
     }
 
     /// Atomically write the snapshot file: tmp + fsync + rename + parent-dir
@@ -227,6 +246,9 @@ impl GanglionStateMachine {
         write().map_err(|error| {
             StorageIOError::write_snapshot(Some(stored.meta.signature()), &error)
         })?;
+        self.telemetry
+            .snapshot_persists
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -568,6 +590,101 @@ mod tests {
                     sm.watch_committed().borrow().generation,
                     model_generation,
                     "watch channel must hold the latest committed state"
+                );
+                Ok(())
+            })?;
+        }
+
+        /// A persistent state machine reloaded from disk must equal the state
+        /// at the last persisted snapshot (build or install), for any
+        /// interleaving of applies, snapshot builds, and snapshot installs.
+        ///
+        /// Op encoding: 0 = apply (advancing generation), 1 = build_snapshot,
+        /// 2 = install leader-shipped snapshot (also advancing generation).
+        #[test]
+        fn fuzz_persistent_state_machine_reload_matches_last_persisted(
+            ops in proptest::collection::vec((0u8..3, 1u64..50), 1..25),
+        ) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "ganglion-sm-fuzz-{}-{nanos}.json",
+                    std::process::id()
+                ));
+
+                let mut sm = GanglionStateMachine::persistent(&path)
+                    .expect("fresh persistent state machine");
+                let leader = openraft::CommittedLeaderId::new(1, 0);
+                let mut model_generation = 0u64;
+                let mut persisted_generation: Option<u64> = None;
+                let mut index = 0u64;
+
+                for (mode, generation_step) in &ops {
+                    match mode {
+                        0 => {
+                            index += 1;
+                            let generation = model_generation + generation_step;
+                            let replies = sm
+                                .apply(vec![Entry::<GanglionRaftConfig> {
+                                    log_id: LogId::new(leader, index),
+                                    payload: EntryPayload::Normal(
+                                        MetadataRaftCommand::ApplySnapshot(
+                                            CoordinationSnapshot {
+                                                generation,
+                                                ..CoordinationSnapshot::default()
+                                            },
+                                        ),
+                                    ),
+                                }])
+                                .await
+                                .expect("apply");
+                            prop_assert!(replies[0].accepted);
+                            model_generation = generation;
+                        }
+                        1 => {
+                            sm.build_snapshot().await.expect("build snapshot");
+                            persisted_generation = Some(model_generation);
+                        }
+                        _ => {
+                            index += 1;
+                            let generation = model_generation + generation_step;
+                            let state = CoordinationSnapshot {
+                                generation,
+                                ..CoordinationSnapshot::default()
+                            };
+                            let data =
+                                serde_json::to_vec(&state).expect("serialize install data");
+                            let meta = SnapshotMeta {
+                                last_log_id: Some(LogId::new(leader, index)),
+                                last_membership: StoredMembership::default(),
+                                snapshot_id: format!("fuzz-install-{index}"),
+                            };
+                            sm.install_snapshot(&meta, Box::new(Cursor::new(data)))
+                                .await
+                                .expect("install snapshot");
+                            model_generation = generation;
+                            persisted_generation = Some(generation);
+                        }
+                    }
+                }
+
+                // Reload from disk: state equals the last persisted point
+                // (or default if nothing was ever persisted).
+                let reloaded =
+                    GanglionStateMachine::persistent(&path).expect("reload persistent SM");
+                prop_assert_eq!(
+                    reloaded.committed_snapshot().generation,
+                    persisted_generation.unwrap_or(0)
+                );
+                prop_assert_eq!(
+                    reloaded.watch_committed().borrow().generation,
+                    persisted_generation.unwrap_or(0)
                 );
                 Ok(())
             })?;

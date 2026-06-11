@@ -112,7 +112,7 @@ Increments `generation` itself (read.generation + 1) so planners don't hand-roll
 - Cross-version note: new command variant is additive to the WAL format; old WALs replay fine
   (serde enum tagging). Test: reopen a WAL written pre-G1 (fixture file).
 
-## Phase G2 — Telemetry + topology introspection
+## Phase G2 — Telemetry + topology introspection — DONE (iteration 50)
 
 ### G2.1 Durability telemetry
 

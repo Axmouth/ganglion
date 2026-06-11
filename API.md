@@ -175,6 +175,15 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Validated `openraft::Config` tuned for the metadata workload: snapshots every
     `SNAPSHOT_LOGS_SINCE_LAST` (256) entries, `MAX_IN_SNAPSHOT_LOG_TO_KEEP` (64) retained after
     purge — this bounds WAL size and startup replay.
+- `StorageTelemetry` / `StorageTelemetrySnapshot`
+  - Plain atomic durability counters (appends, batches, fsyncs, compactions, replay size on open,
+    snapshot persists/loads). Exposed via `FileRaftLogStore::telemetry()`,
+    `GanglionStateMachine::telemetry()`, and aggregated on `RaftMetadataNode::telemetry()`.
+    No metrics-crate dependency; consumers map into their own systems.
+- `RaftTopology`
+  - Serializable per-node view of the raft group (`local_id`, `leader`, `voters`, `learners`,
+    raft-id→address map, applied/snapshot indexes, committed generation). Produced sync via
+    `RaftMetadataNode::topology()`. This is the JSON contract for topology CLIs/admin diagrams.
 
 ## Storage crate (`ganglion-storage`)
 
