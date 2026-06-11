@@ -309,3 +309,11 @@ work in reverse-briefness order while keeping one live roadmap block.
   - `RaftStateMachine` lifecycle methods,
   - `RaftNetwork`/`RaftNetworkFactory` wiring and bootstrap lifecycle calls (`Raft::new`, `initialize`, `client_write`, `metrics`, `shutdown`).
 - Explicitly documented the current crate/version mismatch (`openraft = "0.8"` vs local temp clone `0.10.0-alpha.21`) so the next cycle does not drift across API versions.
+
+## Iteration 34 — Survival context consolidation
+
+- Replaced the previous survival context content with a compact 0.8.9-only anchor focused on:
+  - required feature flags (`storage-v2`, `serde`, runtime support),
+  - minimal storage/network/runtime traits,
+  - compaction/snapshot behavior that must stay stable across turns.
+- Scoped the doc to quick recovery needs so context compaction only needs this one page plus `PLAN`/`WORKLOG`.
