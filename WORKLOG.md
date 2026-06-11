@@ -457,3 +457,21 @@ work in reverse-briefness order while keeping one live roadmap block.
   `[lints.rust]` check-cfg in `Cargo.toml` (macro expands `cfg(feature = "serde")` into our crate).
 - All three short-term roadmap items are done. Next up (medium-term): membership change/learner
   flows on `RaftMetadataNode`.
+
+## Iteration 44 — Membership/learner flows
+
+- USER DECISIONS recorded: (1) `RaftMetadataNode` stays async-only for writes, sync reads via the
+  watch channel — no blocking adapter, no async `MetadataConsensus` variant; (2) membership flows
+  next.
+- Added `RaftMetadataNode::add_learner(id, node, blocking)` and
+  `change_membership(voters, retain)` (full voter-set replacement via openraft's
+  `ChangeMembers::ReplaceAllVoters`); shared `map_membership_error` now maps
+  `ForwardToLeader` → `NotLeader` for writes and membership ops alike.
+- Added lifecycle test (stable across 6 runs): node 4 joins a live 3-node cluster as a blocking
+  learner and catches up; follower-driven membership change is refused with `NotLeader`; learner
+  promoted to voter and observes subsequent writes via watch; voter set shrunk to [2,3,4]
+  dropping node 1, verified through metrics' membership config.
+- Scenario 07 now includes the membership lifecycle test; `API.md` updated.
+- Next: medium-term item 2 is the epoch/fencing schema (needs design + user input when fibril
+  integration starts); item 3 durability telemetry. Considering validation-hardening pass for the
+  raft runtime path as the next concrete objective.

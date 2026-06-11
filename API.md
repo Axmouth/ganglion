@@ -148,6 +148,9 @@ This file tracks what each part of the current scaffolding is meant to do.
     `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`, rejected stale commit →
     `StaleGeneration`), `committed_snapshot`, `watch_committed`, leader/applied-index wait helpers,
     `shutdown`. Durable restart: reopen the WAL and `start_with_store` again — do not re-`initialize`.
+  - Membership: `add_learner(id, node, blocking)` (replication without vote; blocking waits for
+    catch-up) and `change_membership(voters, retain)` (replaces the voter set; `retain` keeps
+    demoted voters as learners). Both leader-only (`NotLeader` otherwise).
 - `default_raft_config()`
   - Validated default `openraft::Config`.
 

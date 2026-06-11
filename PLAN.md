@@ -34,8 +34,9 @@ provide, in priority order:
 - The legacy `OpenraftLikeStore`/`MetadataNode` path stays as the simple sync backend until the
   raft path reaches durability parity; after that it remains as a test double / single-node mode
   unless complexity says otherwise.
-- OPEN DECISION (user input wanted): whether `MetadataConsensus` grows an async variant, or
-  `RaftMetadataNode` keeps its own async API with watch-stream reads being the only sync surface.
+- DECIDED (user, 2026-06-11): `RaftMetadataNode` stays async-only for writes; sync consumers read
+  via `watch_committed()`/`committed_snapshot()`. `MetadataConsensus` remains the sync trait for
+  the legacy in-memory/persisted nodes. No blocking adapter.
 
 ### 2) Pluggable planner strategies
 

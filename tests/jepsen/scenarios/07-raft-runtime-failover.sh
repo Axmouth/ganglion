@@ -9,6 +9,7 @@ echo " - non-leader writes surface NotLeader"
 echo " - leader loss: survivors re-elect and continue committing"
 echo " - partitioned follower rejoins and converges on committed state"
 echo " - durable node restart recovers committed state from the WAL"
+echo " - learner join/catch-up/promotion and voter removal flows work"
 
 if command -v clojure >/dev/null 2>&1; then
   echo "clojure present; running planned jepsen checks"
@@ -22,6 +23,7 @@ cargo test -p ganglion-openraft --features openraft three_node_cluster_elects_re
 cargo test -p ganglion-openraft --features openraft leader_loss_triggers_reelection_and_writes_continue --quiet
 cargo test -p ganglion-openraft --features openraft partitioned_follower_rejoins_and_catches_up --quiet
 cargo test -p ganglion-openraft --features openraft durable_node_recovers_committed_state_after_restart --quiet
+cargo test -p ganglion-openraft --features openraft learner_joins_catches_up_and_gets_promoted --quiet
 cargo test -p ganglion-openraft --features openraft file_store_passes_openraft_contract_suite --quiet
 cargo test -p ganglion-openraft --features openraft file_store_survives_reopen_with_vote_log_and_purge --quiet
 

@@ -22,6 +22,20 @@ use super::{
 
 type NodeId = u64;
 
+/// Map raft client-write/membership errors onto `MetadataConsensus` semantics.
+fn map_membership_error(
+    error: openraft::error::RaftError<
+        NodeId,
+        openraft::error::ClientWriteError<NodeId, BasicNode>,
+    >,
+) -> OpenraftAdapterError {
+    if error.forward_to_leader().is_some() {
+        OpenraftAdapterError::NotLeader
+    } else {
+        OpenraftAdapterError::Storage(error.to_string())
+    }
+}
+
 /// One raft-backed metadata node living inside a process-local cluster.
 ///
 /// Generic over the raft log store: `GanglionLogStore` (in-memory, default) or
@@ -96,13 +110,7 @@ where
 
         let response = match result {
             Ok(response) => response.data,
-            Err(error) => {
-                return if error.forward_to_leader().is_some() {
-                    Err(OpenraftAdapterError::NotLeader)
-                } else {
-                    Err(OpenraftAdapterError::Storage(error.to_string()))
-                };
-            }
+            Err(error) => return Err(map_membership_error(error)),
         };
 
         if !response.accepted {
@@ -185,6 +193,40 @@ where
             .await
             .map(|_| ())
             .map_err(|error| OpenraftAdapterError::Config(error.to_string()))
+    }
+
+    /// Add a learner node: it receives replication but does not vote.
+    ///
+    /// `blocking` waits until the learner has caught up to the leader's log.
+    /// Leader-only; non-leaders surface `NotLeader`.
+    pub async fn add_learner(
+        &self,
+        id: NodeId,
+        node: BasicNode,
+        blocking: bool,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.raft
+            .add_learner(id, node, blocking)
+            .await
+            .map(|_| ())
+            .map_err(map_membership_error)
+    }
+
+    /// Change the voter set. Members must already be learners (or voters).
+    ///
+    /// With `retain`, demoted voters stay on as learners; otherwise they are
+    /// removed from the cluster entirely. Leader-only.
+    pub async fn change_membership(
+        &self,
+        voters: impl IntoIterator<Item = NodeId>,
+        retain: bool,
+    ) -> Result<(), OpenraftAdapterError> {
+        let voters: std::collections::BTreeSet<NodeId> = voters.into_iter().collect();
+        self.raft
+            .change_membership(voters, retain)
+            .await
+            .map(|_| ())
+            .map_err(map_membership_error)
     }
 
     /// Access the raw raft handle for membership changes and metrics.
@@ -487,6 +529,99 @@ mod tests {
             assert_eq!(partitioned.committed_snapshot().generation, 1);
 
             for node in &nodes {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    #[test]
+    fn learner_joins_catches_up_and_gets_promoted() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let router = InProcessRouter::new();
+            let nodes = start_cluster(&router, &[1, 2, 3]).await;
+            let timeout = Duration::from_secs(10);
+
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("initial election");
+            let leader = nodes
+                .iter()
+                .find(|node| node.node_id() == leader_id)
+                .expect("leader handle");
+
+            leader
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("pre-join write");
+
+            // Node 4 joins as a learner and catches up (blocking add).
+            let joiner = RaftMetadataNode::start(4, test_config(), &router)
+                .await
+                .expect("joiner should start");
+            leader
+                .add_learner(4, BasicNode::new("node-4"), true)
+                .await
+                .expect("learner should be added and caught up");
+            assert_eq!(joiner.committed_snapshot().generation, 1);
+
+            // Followers cannot drive membership changes.
+            let follower = nodes
+                .iter()
+                .find(|node| node.node_id() != leader_id)
+                .expect("a follower");
+            let err = follower
+                .add_learner(5, BasicNode::new("node-5"), false)
+                .await
+                .expect_err("follower add_learner must be refused");
+            assert!(matches!(err, OpenraftAdapterError::NotLeader));
+
+            // Promote the learner into the voter set (keep all four voters).
+            leader
+                .change_membership([1, 2, 3, 4], false)
+                .await
+                .expect("promotion should commit");
+
+            // New voter observes subsequent writes.
+            leader
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("post-promotion write");
+            let mut watch = joiner.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < 2 {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("promoted voter should observe new writes");
+
+            // Shrink back to three voters, dropping node 1 entirely.
+            leader
+                .change_membership([2, 3, 4], false)
+                .await
+                .expect("removal should commit");
+            let metrics = leader.raft().metrics().borrow().clone();
+            let voters: Vec<NodeId> = metrics
+                .membership_config
+                .membership()
+                .voter_ids()
+                .collect();
+            assert_eq!(voters, vec![2, 3, 4]);
+
+            for node in nodes.iter().chain(std::iter::once(&joiner)) {
                 node.shutdown().await.expect("shutdown");
             }
         });
