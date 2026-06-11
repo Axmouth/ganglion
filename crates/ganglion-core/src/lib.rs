@@ -191,6 +191,61 @@ impl PartitionAssignment {
     }
 }
 
+/// Why an assignment's fencing epoch advanced (or did not).
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum EpochTransition {
+    /// Owner unchanged; follower-only churn never fences.
+    Unchanged,
+    /// Ownership moved to a different node.
+    OwnerChanged,
+    /// Resource had no committed assignment.
+    NewAssignment,
+}
+
+/// Pure fencing rule: the epoch a desired assignment must carry, given the
+/// committed assignment for the same resource.
+///
+/// Owner changes increment the epoch (split-brain fencing); follower-only
+/// changes keep it; brand-new assignments start at 1. Epochs never decrease.
+pub fn next_assignment_epoch(
+    committed: Option<&PartitionAssignment>,
+    desired_owner: &str,
+) -> (u64, EpochTransition) {
+    match committed {
+        None => (1, EpochTransition::NewAssignment),
+        Some(current) if current.owner == desired_owner => {
+            (current.epoch, EpochTransition::Unchanged)
+        }
+        Some(current) => (current.epoch + 1, EpochTransition::OwnerChanged),
+    }
+}
+
+/// Operator-driven fence: bump the epoch without changing ownership.
+pub fn fence_assignment_epoch(committed: &PartitionAssignment) -> u64 {
+    committed.epoch + 1
+}
+
+/// Stamp fencing epochs across a planned snapshot from the committed one.
+///
+/// Returns the per-resource transitions for logging/telemetry. Resources that
+/// disappeared from `desired` are not tracked here; if a resource can be
+/// removed and later re-added, the caller must retain its last epoch
+/// (tombstone) and seed `committed` accordingly, otherwise the epoch restarts
+/// at 1.
+pub fn stamp_assignment_epochs(
+    committed: &CoordinationSnapshot,
+    desired: &mut CoordinationSnapshot,
+) -> Vec<(ResourceIdentity, EpochTransition)> {
+    let mut transitions = Vec::with_capacity(desired.assignments.len());
+    for (resource, assignment) in &mut desired.assignments {
+        let (epoch, transition) =
+            next_assignment_epoch(committed.assignments.get(resource), &assignment.owner);
+        assignment.epoch = epoch;
+        transitions.push((resource.clone(), transition));
+    }
+    transitions
+}
+
 /// Full control-plane snapshot, including all known node and assignment state.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CoordinationSnapshot {
@@ -679,6 +734,116 @@ mod tests {
             }
         }
         deduped
+    }
+
+    #[test]
+    fn epoch_rules_matrix() {
+        let resource = ResourceIdentity::new("ns", "topic-a", 0, None::<String>);
+        let committed =
+            PartitionAssignment::new(resource.clone(), "node-a", vec!["node-b".to_string()], 4);
+
+        // New assignment starts at epoch 1.
+        assert_eq!(
+            next_assignment_epoch(None, "node-a"),
+            (1, EpochTransition::NewAssignment)
+        );
+        // Same owner keeps the epoch, regardless of follower churn.
+        assert_eq!(
+            next_assignment_epoch(Some(&committed), "node-a"),
+            (4, EpochTransition::Unchanged)
+        );
+        // Owner change bumps.
+        assert_eq!(
+            next_assignment_epoch(Some(&committed), "node-b"),
+            (5, EpochTransition::OwnerChanged)
+        );
+        // Explicit fence bumps without ownership change.
+        assert_eq!(fence_assignment_epoch(&committed), 5);
+    }
+
+    #[test]
+    fn stamp_assignment_epochs_applies_rules_across_snapshot() {
+        let kept = ResourceIdentity::new("ns", "kept", 0, None::<String>);
+        let moved = ResourceIdentity::new("ns", "moved", 0, None::<String>);
+        let fresh = ResourceIdentity::new("ns", "fresh", 0, None::<String>);
+
+        let mut committed = CoordinationSnapshot::default();
+        committed.assignments.insert(
+            kept.clone(),
+            PartitionAssignment::new(kept.clone(), "node-a", vec![], 2),
+        );
+        committed.assignments.insert(
+            moved.clone(),
+            PartitionAssignment::new(moved.clone(), "node-a", vec![], 7),
+        );
+
+        let mut desired = CoordinationSnapshot::default();
+        // Same owner, different followers: epoch must hold.
+        desired.assignments.insert(
+            kept.clone(),
+            PartitionAssignment::new(kept.clone(), "node-a", vec!["node-c".to_string()], 999),
+        );
+        // New owner: epoch must bump from committed, ignoring whatever the
+        // planner left in the field.
+        desired.assignments.insert(
+            moved.clone(),
+            PartitionAssignment::new(moved.clone(), "node-b", vec![], 0),
+        );
+        desired.assignments.insert(
+            fresh.clone(),
+            PartitionAssignment::new(fresh.clone(), "node-c", vec![], 0),
+        );
+
+        let transitions = stamp_assignment_epochs(&committed, &mut desired);
+
+        assert_eq!(desired.assignments[&kept].epoch, 2);
+        assert_eq!(desired.assignments[&moved].epoch, 8);
+        assert_eq!(desired.assignments[&fresh].epoch, 1);
+
+        let by_resource: BTreeMap<_, _> = transitions.into_iter().collect();
+        assert_eq!(by_resource[&kept], EpochTransition::Unchanged);
+        assert_eq!(by_resource[&moved], EpochTransition::OwnerChanged);
+        assert_eq!(by_resource[&fresh], EpochTransition::NewAssignment);
+    }
+
+    proptest! {
+        /// Epochs never decrease across arbitrary owner-change sequences, and
+        /// bump exactly when the owner changes.
+        #[test]
+        fn fuzz_epoch_monotonic_across_owner_sequences(
+            owner_choices in proptest::collection::vec(0u8..3, 1..30),
+        ) {
+            let resource = ResourceIdentity::new("ns", "t", 0, None::<String>);
+            let mut committed: Option<PartitionAssignment> = None;
+
+            for choice in owner_choices {
+                let owner = format!("node-{choice}");
+                let (epoch, transition) = next_assignment_epoch(committed.as_ref(), &owner);
+
+                match (&committed, transition) {
+                    (None, EpochTransition::NewAssignment) => prop_assert_eq!(epoch, 1),
+                    (Some(prev), EpochTransition::Unchanged) => {
+                        prop_assert_eq!(&prev.owner, &owner);
+                        prop_assert_eq!(epoch, prev.epoch);
+                    }
+                    (Some(prev), EpochTransition::OwnerChanged) => {
+                        prop_assert_ne!(&prev.owner, &owner);
+                        prop_assert_eq!(epoch, prev.epoch + 1);
+                    }
+                    (state, transition) => prop_assert!(
+                        false,
+                        "impossible transition {transition:?} for state {state:?}"
+                    ),
+                }
+
+                committed = Some(PartitionAssignment::new(
+                    resource.clone(),
+                    owner,
+                    vec![],
+                    epoch,
+                ));
+            }
+        }
     }
 
     #[test]

@@ -124,10 +124,12 @@ This file tracks what each part of the current scaffolding is meant to do.
 - `GanglionRaftConfig`
   - `openraft::RaftTypeConfig` for the metadata raft group
     (`NodeId = u64`, `Node = BasicNode`, `SnapshotData = Cursor<Vec<u8>>`).
-- `MetadataRaftCommand` / `MetadataRaftResponse`
-  - App payload (`ApplySnapshot(CoordinationSnapshot)`) and response
-    (`accepted: bool` + committed `snapshot`); stale generations come back
-    `accepted = false`, decided deterministically inside the replicated state machine.
+- `MetadataRaftCommand` / `MetadataRaftResponse` / `MetadataRejection`
+  - App payloads: `ApplySnapshot(CoordinationSnapshot)` and
+    `ApplySnapshotGuarded { expected_generation, snapshot }` (CAS — commits only if the committed
+    generation still matches; checked inside the replicated apply, race-free by construction).
+  - Response: `accepted: bool`, `rejection: Option<MetadataRejection>`
+    (`StaleGeneration` | `GenerationMismatch { expected, actual }`), committed `snapshot`.
 - `GanglionLogStore`
   - In-memory `RaftLogReader` + `RaftLogStorage`; passes `openraft::testing::Suite`.
 - `FileRaftLogStore`
@@ -156,6 +158,19 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Membership: `add_learner(id, node, blocking)` (replication without vote; blocking waits for
     catch-up) and `change_membership(voters, retain)` (replaces the voter set; `retain` keeps
     demoted voters as learners). Both leader-only (`NotLeader` otherwise).
+  - Guarded writes: `write_snapshot_guarded(expected_generation, snapshot)` (CAS;
+    `GenerationMismatch` error on lost race) and `plan_and_propose_guarded(plan, max_retries)`
+    (read committed → pure `plan` → generation bump + epoch stamping → guarded propose → retry on
+    mismatch). The race-safe controller-loop primitive.
+
+### Epoch/fencing helpers (`ganglion-core`)
+
+- `next_assignment_epoch(committed, desired_owner) -> (u64, EpochTransition)`
+  - Owner change bumps; follower churn holds; new assignments start at 1.
+- `fence_assignment_epoch(committed) -> u64` — operator fence without ownership change.
+- `stamp_assignment_epochs(committed, &mut desired) -> Vec<(ResourceIdentity, EpochTransition)>`
+  - Applies the rule across a planned snapshot; caller owns tombstone retention if resources can
+    be removed and re-added.
 - `default_raft_config()`
   - Validated `openraft::Config` tuned for the metadata workload: snapshots every
     `SNAPSHOT_LOGS_SINCE_LAST` (256) entries, `MAX_IN_SNAPSHOT_LOG_TO_KEEP` (64) retained after

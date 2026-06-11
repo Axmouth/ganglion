@@ -17,6 +17,11 @@ mod openraft_runtime;
 pub enum OpenraftAdapterError {
     NotLeader,
     StaleGeneration,
+    /// Guarded (CAS) write lost the race: committed generation moved on.
+    GenerationMismatch {
+        expected: u64,
+        actual: u64,
+    },
     PoisonedState,
     StaleTerm,
     Planner(PlacementError),
@@ -31,6 +36,10 @@ impl fmt::Display for OpenraftAdapterError {
             Self::StaleGeneration => {
                 f.write_str("snapshot generation is older than current generation")
             }
+            Self::GenerationMismatch { expected, actual } => write!(
+                f,
+                "guarded write expected generation {expected} but found {actual}"
+            ),
             Self::PoisonedState => f.write_str("consensus state lock was poisoned"),
             Self::StaleTerm => f.write_str("proposal term is older than current leader term"),
             Self::Config(error) => write!(f, "configuration error: {error}"),
@@ -2338,6 +2347,7 @@ mod tests {
                 | Err(OpenraftAdapterError::PoisonedState)
                 | Err(OpenraftAdapterError::NotLeader)
                 | Err(OpenraftAdapterError::StaleGeneration)
+                | Err(OpenraftAdapterError::GenerationMismatch { .. })
                 | Err(OpenraftAdapterError::StaleTerm) => {
                     prop_assert!(false, "unexpected constructor error variant");
                 }

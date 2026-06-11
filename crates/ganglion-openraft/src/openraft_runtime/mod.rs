@@ -32,15 +32,33 @@ pub use storage::{GanglionLogStore, GanglionStateMachine};
 pub enum MetadataRaftCommand {
     /// Replace the committed coordination snapshot.
     ApplySnapshot(CoordinationSnapshot),
+    /// Replace the snapshot only if the committed generation still equals
+    /// `expected_generation` (CAS for racing controllers). The check runs
+    /// inside the replicated `apply`, so it is race-free by construction.
+    ApplySnapshotGuarded {
+        expected_generation: u64,
+        snapshot: CoordinationSnapshot,
+    },
+}
+
+/// Deterministic state-machine rejection reasons.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MetadataRejection {
+    /// Snapshot generation is older than the committed one.
+    StaleGeneration,
+    /// Guarded write lost the CAS race: committed generation moved on.
+    GenerationMismatch { expected: u64, actual: u64 },
 }
 
 /// Application-level response returned from the state machine.
 ///
-/// `accepted` is `false` when the command was deterministically rejected
-/// (stale generation); `snapshot` always carries the post-apply committed state.
+/// `rejection` is `Some` (and `accepted` false) when the command was
+/// deterministically rejected; `snapshot` always carries the post-apply
+/// committed state.
 #[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetadataRaftResponse {
     pub accepted: bool,
+    pub rejection: Option<MetadataRejection>,
     pub snapshot: CoordinationSnapshot,
 }
 

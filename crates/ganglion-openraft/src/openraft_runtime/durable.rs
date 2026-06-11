@@ -435,6 +435,36 @@ mod tests {
         });
     }
 
+    /// Pins the v1 (pre-guarded-command) WAL record encoding: WALs written
+    /// before `ApplySnapshotGuarded` existed must keep replaying. If this test
+    /// breaks, the WAL format changed incompatibly — that needs a migration,
+    /// not a fixture update.
+    #[test]
+    fn file_store_replays_pre_guarded_format_wal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let path = unique_wal_path("v1-fixture");
+            let fixture = concat!(
+                r#"{"Vote":{"leader_id":{"term":1,"node_id":7},"committed":false}}"#,
+                "\n",
+                r#"{"Entry":{"log_id":{"leader_id":{"term":1,"node_id":0},"index":1},"payload":{"Normal":{"ApplySnapshot":{"nodes":{},"assignments":{},"generation":3}}}}}"#,
+                "\n",
+            );
+            std::fs::write(&path, fixture).expect("write fixture WAL");
+
+            let mut store = FileRaftLogStore::open(&path).expect("v1 WAL must replay");
+            assert_eq!(
+                store.read_vote().await.expect("vote"),
+                Some(Vote::new(1, 7))
+            );
+            let entries = store.try_get_log_entries(..).await.expect("entries");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].log_id.index, 1);
+        });
+    }
+
     #[test]
     fn file_store_rejects_malformed_wal() {
         let path = unique_wal_path("malformed");

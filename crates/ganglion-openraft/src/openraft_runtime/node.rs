@@ -140,20 +140,73 @@ where
         &self,
         snapshot: CoordinationSnapshot,
     ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
-        let result = self
-            .raft
-            .client_write(MetadataRaftCommand::ApplySnapshot(snapshot))
-            .await;
+        self.submit_command(MetadataRaftCommand::ApplySnapshot(snapshot))
+            .await
+    }
 
-        let response = match result {
+    /// CAS write: commits only if the committed generation still equals
+    /// `expected_generation`, otherwise fails with `GenerationMismatch`.
+    /// Controller loops should re-read, re-plan, and retry on mismatch
+    /// (or use [`Self::plan_and_propose_guarded`]).
+    pub async fn write_snapshot_guarded(
+        &self,
+        expected_generation: u64,
+        snapshot: CoordinationSnapshot,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::ApplySnapshotGuarded {
+            expected_generation,
+            snapshot,
+        })
+        .await
+    }
+
+    /// One race-safe controller iteration: read committed state, produce the
+    /// desired snapshot via `plan` (pure!), bump the generation, stamp fencing
+    /// epochs, and propose guarded. Retries up to `max_retries` times when
+    /// another proposal won the CAS race in between.
+    pub async fn plan_and_propose_guarded<F>(
+        &self,
+        plan: F,
+        max_retries: usize,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError>
+    where
+        F: Fn(&CoordinationSnapshot) -> CoordinationSnapshot,
+    {
+        let mut attempts = 0;
+        loop {
+            let committed = self.committed_snapshot();
+            let expected = committed.generation;
+            let mut desired = plan(&committed);
+            desired.generation = expected + 1;
+            ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
+
+            match self.write_snapshot_guarded(expected, desired).await {
+                Err(OpenraftAdapterError::GenerationMismatch { .. }) if attempts < max_retries => {
+                    attempts += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+
+    async fn submit_command(
+        &self,
+        command: MetadataRaftCommand,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        let response = match self.raft.client_write(command).await {
             Ok(response) => response.data,
             Err(error) => return Err(map_membership_error(error)),
         };
 
-        if !response.accepted {
-            return Err(OpenraftAdapterError::StaleGeneration);
+        match response.rejection {
+            None => Ok(response),
+            Some(super::MetadataRejection::StaleGeneration) => {
+                Err(OpenraftAdapterError::StaleGeneration)
+            }
+            Some(super::MetadataRejection::GenerationMismatch { expected, actual }) => {
+                Err(OpenraftAdapterError::GenerationMismatch { expected, actual })
+            }
         }
-        Ok(response)
     }
 
     /// Committed coordination snapshot as applied on this node.
@@ -565,6 +618,120 @@ mod tests {
             .expect("rejoined follower should catch up");
             assert_eq!(partitioned.committed_snapshot().generation, 1);
 
+            for node in &nodes {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    #[test]
+    fn racing_guarded_controllers_never_lose_updates() {
+        use ganglion_core::{NodeInfo as GNodeInfo, PartitionAssignment, ResourceIdentity};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let router = InProcessRouter::new();
+            let nodes = start_cluster(&router, &[1, 2, 3]).await;
+            let timeout = Duration::from_secs(10);
+
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election");
+            let leader = nodes
+                .iter()
+                .find(|node| node.node_id() == leader_id)
+                .expect("leader handle");
+
+            // Watch sampler: any observed sequence must be monotonic in
+            // generation and per-resource epoch (watch may coalesce; that's
+            // fine — monotonicity must hold on every sampled subsequence).
+            let resource = ResourceIdentity::new("ns", "contended", 0, None::<String>);
+            let mut sampler = leader.watch_committed();
+            let sampler_resource = resource.clone();
+            let sampler_task = tokio::spawn(async move {
+                let mut last_generation = 0u64;
+                let mut last_epoch = 0u64;
+                while sampler.changed().await.is_ok() {
+                    let snapshot = sampler.borrow_and_update().clone();
+                    assert!(
+                        snapshot.generation >= last_generation,
+                        "generation regressed: {} -> {}",
+                        last_generation,
+                        snapshot.generation
+                    );
+                    last_generation = snapshot.generation;
+                    if let Some(assignment) = snapshot.assignments.get(&sampler_resource) {
+                        assert!(
+                            assignment.epoch >= last_epoch,
+                            "epoch regressed: {} -> {}",
+                            last_epoch,
+                            assignment.epoch
+                        );
+                        last_epoch = assignment.epoch;
+                    }
+                }
+            });
+
+            // Two controllers race: each wants the contended resource owned by
+            // its own broker. Every accepted proposal flips ownership, so the
+            // epoch must bump nearly every round — and CAS retries must absorb
+            // all interleaving without lost updates.
+            const ROUNDS: usize = 20;
+            let controller = |owner: &'static str| {
+                let node = leader;
+                let resource = resource.clone();
+                async move {
+                    let mut accepted = 0u64;
+                    for _ in 0..ROUNDS {
+                        let resource = resource.clone();
+                        let response = node
+                            .plan_and_propose_guarded(
+                                move |committed| {
+                                    let mut desired = committed.clone();
+                                    desired.nodes.insert(
+                                        owner.to_string(),
+                                        GNodeInfo::new(owner, "127.0.0.1:0", None::<String>),
+                                    );
+                                    desired.assignments.insert(
+                                        resource.clone(),
+                                        PartitionAssignment::new(
+                                            resource.clone(),
+                                            owner,
+                                            vec![],
+                                            0, // stamped by the helper
+                                        ),
+                                    );
+                                    desired
+                                },
+                                64,
+                            )
+                            .await
+                            .expect("guarded proposal should eventually win");
+                        assert!(response.accepted);
+                        accepted += 1;
+                    }
+                    accepted
+                }
+            };
+
+            let (a_accepted, b_accepted) =
+                tokio::join!(controller("broker-a"), controller("broker-b"));
+
+            // No lost updates: every accepted proposal advanced the generation
+            // by exactly one.
+            let final_snapshot = leader.committed_snapshot();
+            assert_eq!(final_snapshot.generation, a_accepted + b_accepted);
+            let final_assignment = &final_snapshot.assignments[&resource];
+            assert!(final_assignment.epoch >= 1);
+            assert!(final_assignment.owner == "broker-a" || final_assignment.owner == "broker-b");
+
+            drop(sampler_task);
             for node in &nodes {
                 node.shutdown().await.expect("shutdown");
             }

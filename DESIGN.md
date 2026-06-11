@@ -5,7 +5,7 @@ work is mostly mechanical. Sections are ordered by execution phase. Each phase l
 semantics, and the tests that gate it. Update this file as phases land; move finished phases into
 `WORKLOG.md` iteration entries.
 
-## Phase G1 — Epoch issuance + guarded proposals
+## Phase G1 — Epoch issuance + guarded proposals — DONE (iteration 49)
 
 Spike-verified context: fibril and ganglion both carry `PartitionAssignment.epoch` and the
 mapping is 1:1. What is missing is *issuance discipline* (who bumps, when) and *race safety*

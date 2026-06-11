@@ -558,3 +558,26 @@ work in reverse-briefness order while keeping one live roadmap block.
   F4 `GET /topology` JSON contract + `fibril-cli topology` + admin diagram sequencing;
   F5 coordination playground; cross-repo confidence-suite summary table.
 - Execution order stays: G1 → G2 → G3, then F1 → F5 on the fibril side.
+
+## Iteration 49 — Phase G1: epoch issuance + guarded CAS proposals
+
+- `ganglion-core`: `EpochTransition`, `next_assignment_epoch` (new=1, same-owner holds,
+  owner-change bumps), `fence_assignment_epoch`, `stamp_assignment_epochs` (snapshot-wide, returns
+  transitions; tombstone retention documented as caller's job). Unit matrix + monotonicity fuzz.
+- `ganglion-openraft`: `MetadataRaftCommand::ApplySnapshotGuarded { expected_generation, snapshot }`
+  — CAS checked inside the replicated apply (race-free by construction).
+  `MetadataRaftResponse` gained `rejection: Option<MetadataRejection>`
+  (`StaleGeneration` | `GenerationMismatch`); `OpenraftAdapterError::GenerationMismatch` added.
+- `RaftMetadataNode`: `write_snapshot_guarded`, and `plan_and_propose_guarded(plan, max_retries)`
+  — the controller-loop primitive (read → pure plan → generation bump + epoch stamp → guarded
+  propose → retry on mismatch).
+- Tests (all gates from DESIGN G1):
+  - SM model fuzz extended to guarded commands; first model draft was wrong (a "wrong" guard can
+    become right when earlier batch ops advance the generation) — the SM was correct, the model
+    was fixed to true CAS semantics.
+  - `racing_guarded_controllers_never_lose_updates`: two controllers × 20 rounds flipping
+    ownership on one resource; final generation == total accepted proposals (no lost updates),
+    watch-sampled generations/epochs monotonic. Stable across 5 runs.
+  - `file_store_replays_pre_guarded_format_wal`: v1 WAL record encoding pinned as a literal
+    fixture — breaking it means a WAL migration, not a fixture update.
+- fibril spike still green against the changed response type. Next: G2 (telemetry + RaftTopology).

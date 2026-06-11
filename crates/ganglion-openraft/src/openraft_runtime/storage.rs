@@ -17,7 +17,7 @@ use openraft::{
     SnapshotMeta, StorageError, StorageIOError, StoredMembership, Vote,
 };
 
-use super::{GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse};
+use super::{GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection};
 
 type NodeId = u64;
 
@@ -306,29 +306,48 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         let mut replies = Vec::new();
         let mut state_changed = false;
 
+        // All rejections are decided here, inside the replicated apply: every
+        // replica sees the same command order, so the outcome is deterministic.
+        let mut apply_command = |inner: &mut StateMachineInner,
+                                 command: MetadataRaftCommand|
+         -> Option<MetadataRejection> {
+            let snapshot = match command {
+                MetadataRaftCommand::ApplySnapshot(snapshot) => snapshot,
+                MetadataRaftCommand::ApplySnapshotGuarded {
+                    expected_generation,
+                    snapshot,
+                } => {
+                    if inner.state.generation != expected_generation {
+                        return Some(MetadataRejection::GenerationMismatch {
+                            expected: expected_generation,
+                            actual: inner.state.generation,
+                        });
+                    }
+                    snapshot
+                }
+            };
+
+            if snapshot.generation < inner.state.generation {
+                return Some(MetadataRejection::StaleGeneration);
+            }
+            inner.state = snapshot;
+            state_changed = true;
+            None
+        };
+
         for entry in entries {
             inner.last_applied = Some(entry.log_id);
-            let accepted = match entry.payload {
-                EntryPayload::Blank => true,
-                EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(snapshot)) => {
-                    // Deterministic stale-generation rejection: every replica
-                    // sees the same command order, so this check is replicated
-                    // state-machine safe.
-                    if snapshot.generation < inner.state.generation {
-                        false
-                    } else {
-                        inner.state = snapshot;
-                        state_changed = true;
-                        true
-                    }
-                }
+            let rejection = match entry.payload {
+                EntryPayload::Blank => None,
+                EntryPayload::Normal(command) => apply_command(&mut inner, command),
                 EntryPayload::Membership(membership) => {
                     inner.last_membership = StoredMembership::new(Some(entry.log_id), membership);
-                    true
+                    None
                 }
             };
             replies.push(MetadataRaftResponse {
-                accepted,
+                accepted: rejection.is_none(),
+                rejection,
                 snapshot: inner.state.clone(),
             });
         }
@@ -456,12 +475,17 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
-        /// The state machine must behave exactly like a running-max model:
-        /// a command is accepted iff its generation >= the current state's,
-        /// regardless of batching; the final state is the last accepted command.
+        /// The state machine must behave exactly like a running-max model with
+        /// CAS guards: plain commands are accepted iff `generation >= current`;
+        /// guarded commands additionally require `expected == current`
+        /// generation at apply time. Batching must not change outcomes.
+        ///
+        /// Op encoding: `mode` 0 = plain, 1 = guarded with the correct
+        /// expectation (resolved at apply time), 2 = guarded with a wrong
+        /// expectation (off by `1 + offset`).
         #[test]
         fn fuzz_state_machine_matches_running_max_model(
-            generations in proptest::collection::vec(0u64..8, 1..40),
+            ops in proptest::collection::vec((0u8..3, 0u64..8, 0u64..3), 1..40),
             batch_split in 1usize..8,
         ) {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -473,28 +497,65 @@ mod tests {
                 let mut index = 0u64;
                 let leader = openraft::CommittedLeaderId::new(1, 0);
 
-                for chunk in generations.chunks(batch_split) {
+                for chunk in ops.chunks(batch_split) {
+                    // Resolve expectations against the model BEFORE applying the
+                    // chunk, exactly like a controller that read committed state
+                    // and then proposed: earlier commands in the same batch can
+                    // invalidate later guards.
+                    let read_generation = model_generation;
                     let entries: Vec<Entry<GanglionRaftConfig>> = chunk
                         .iter()
-                        .map(|generation| {
+                        .map(|(mode, generation, offset)| {
                             index += 1;
+                            let snapshot = CoordinationSnapshot {
+                                generation: *generation,
+                                ..CoordinationSnapshot::default()
+                            };
+                            let command = match mode {
+                                0 => MetadataRaftCommand::ApplySnapshot(snapshot),
+                                1 => MetadataRaftCommand::ApplySnapshotGuarded {
+                                    expected_generation: read_generation,
+                                    snapshot,
+                                },
+                                _ => MetadataRaftCommand::ApplySnapshotGuarded {
+                                    expected_generation: read_generation + 1 + offset,
+                                    snapshot,
+                                },
+                            };
                             Entry {
                                 log_id: LogId::new(leader, index),
-                                payload: EntryPayload::Normal(
-                                    MetadataRaftCommand::ApplySnapshot(CoordinationSnapshot {
-                                        generation: *generation,
-                                        ..CoordinationSnapshot::default()
-                                    }),
-                                ),
+                                payload: EntryPayload::Normal(command),
                             }
                         })
                         .collect();
 
                     let replies = sm.apply(entries).await.expect("apply never errors");
-                    for (generation, reply) in chunk.iter().zip(replies) {
-                        let expect_accept = *generation >= model_generation;
-                        prop_assert_eq!(reply.accepted, expect_accept);
-                        if expect_accept {
+                    for ((mode, generation, offset), reply) in chunk.iter().zip(replies) {
+                        // True CAS semantics: a guard only matters if its
+                        // expectation differs from the generation at apply
+                        // time — a "wrong" guess can become right when earlier
+                        // ops in the batch advanced the generation.
+                        let guard = match mode {
+                            0 => None,
+                            1 => Some(read_generation),
+                            _ => Some(read_generation + 1 + offset),
+                        };
+                        let expected_rejection = match guard {
+                            Some(expected) if expected != model_generation => {
+                                Some(MetadataRejection::GenerationMismatch {
+                                    expected,
+                                    actual: model_generation,
+                                })
+                            }
+                            _ if *generation < model_generation => {
+                                Some(MetadataRejection::StaleGeneration)
+                            }
+                            _ => None,
+                        };
+
+                        prop_assert_eq!(reply.rejection, expected_rejection);
+                        prop_assert_eq!(reply.accepted, expected_rejection.is_none());
+                        if expected_rejection.is_none() {
                             model_generation = *generation;
                         }
                         prop_assert_eq!(reply.snapshot.generation, model_generation);
