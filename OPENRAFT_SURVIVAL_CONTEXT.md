@@ -1,87 +1,86 @@
-# Openraft Survival Context
+# OpenRaft Survival Context (v0.8.9)
 
-This is the compact anchor for continuing work after context compaction.  
-Current repo target: `openraft = "0.8"` in `crates/ganglion-openraft/Cargo.toml`.
+This file is the continuation anchor after context compaction.
+OpenRaft target is in `crates/ganglion-openraft/Cargo.toml` and currently pinned to `openraft = "0.8.9"`.
+Reference example app: `~/code/temp/openraft/examples/raft-kv-memstore`.
 
-## Source files (what to reopen first)
+## Source files to reopen first
 
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/raft.rs`
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/storage/v2.rs`
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/storage/mod.rs`
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/network/network.rs`
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/network/factory.rs`
-- `~/.cargo/registry/src/.../openraft-0.8.9/src/raft_types.rs`
-- examples for shape/reference: `~/code/temp/openraft/examples/raft-kv-memstore`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/raft.rs`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/storage/mod.rs`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/storage/v2.rs`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/network/network.rs`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/network/factory.rs`
+- `~/.cargo/registry/src/*/openraft-0.8.9/src/raft_types.rs`
 
-## Required integration surface (0.8)
+## Needed API surface (non-exhaustive)
 
-### 1) Raft type config and payloads
+### Type config
 
-- `TypeConfig`: `impl openraft::RaftTypeConfig`
-- associated types:
-  - `D: AppData` (request payload)
-  - `R: AppDataResponse` (response payload)
-  - `NodeId`, `Node` (often `BasicNode`)
-  - `Entry`, `SnapshotData`
+- `RaftTypeConfig` (`src/raft.rs`):
+  - `type D: AppData`
+  - `type R: AppDataResponse`
+  - `type NodeId: NodeId`
+  - `type Node: Node`
+  - `type Entry: RaftEntry<Self::NodeId, Self::Node> + FromAppData<Self::D>`
+  - `type SnapshotData: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static`
 
-### 2) Log subsystem
+### Storage surface
 
-Traits to provide:
-- `RaftLogReader`
-  - `get_log_state() -> Result<LogState>`
+- `RaftLogReader<C>`:
+  - `get_log_state(&mut self) -> Result<LogState<C>, StorageError<C::NodeId>>`
   - `try_get_log_entries(range)`
-- `RaftLogStorage`
+- `RaftLogStorage<C>`:
   - `get_log_reader()`
-  - `save_vote(&vote)`
-  - `read_vote()`
-  - `append(entries, callback)`
+  - `save_vote(&mut self, vote)`
+  - `read_vote(&mut self)`
+  - `append(entries, callback)` (durability callback)
   - `truncate(log_id)`
   - `purge(log_id)`
+- `RaftStateMachine<C>`:
+  - `applied_state()`
+  - `apply(entries)`
+  - `get_snapshot_builder()`
+  - `begin_receiving_snapshot()`
+  - `install_snapshot(meta, snapshot)`
+  - `get_current_snapshot()`
 
-### 3) State machine + snapshots
+### Network surface
 
-Trait: `RaftStateMachine`
-- `applied_state()`
-- `apply(entries)`
-- `get_snapshot_builder()`
-- `begin_receiving_snapshot()`
-- `install_snapshot(meta, snapshot)`
-- `get_current_snapshot()`
+- `RaftNetwork<C>`:
+  - `append_entries(rpc, option)`
+  - `vote(rpc, option)`
+  - `install_snapshot(rpc, option)`
+  - `backoff()`
+- `RaftNetworkFactory<C>`:
+  - `type Network: RaftNetwork<C>`
+  - `new_client(target, node) -> Network`
 
-### 4) Network
+### Runtime/control surface (`Raft`)
 
-Trait: `RaftNetworkFactory`
-- `type Network: RaftNetwork`
-- `new_client(target, node) -> Network`
-
-Trait: `RaftNetwork`
-- `append_entries(rpc, option)`
-- `vote(rpc, option)`
-- `install_snapshot(rpc, option)`
-- `backoff()`
-
-### 5) Node/runtime control
-
-From `Raft`:
 - `Raft::new(id, config, network, log_store, state_machine)`
-- `initialize(members)`
-- `client_write(app_data)`
-- `add_learner(id, node, blocking)`
-- `change_membership(members, retain)`
-- `current_leader()` / `is_leader()`
-- `metrics()`
-- `shutdown()`
+- `Raft::append_entries(...)`
+- `Raft::vote(...)`
+- `Raft::install_snapshot(...)`
+- `Raft::initialize(members)`
+- `Raft::client_write(app_data)`
+- `Raft::add_learner(id, node, blocking)`
+- `Raft::change_membership(members, retain)`
+- `Raft::current_leader()`
+- `Raft::is_leader()`
+- `Raft::metrics()`
+- `Raft::shutdown().await`
 
-## Important behavior rules (do not skip)
+## Hard rules to preserve
 
-- Log/index continuity: no holes.
-- `append` must not return before entries are readable; callback must fire only when durable.
-- `truncate`/`purge` must avoid leaving holes.
-- Persisted vote has to be durable before return.
-- Always stop raft handles with `shutdown().await` to avoid long-lived background tasks.
-- In v0.8, traits in `v2.rs` are sealed unless feature `storage-v2` is enabled.
-  - If implementing `RaftStorage` first, `storage::Adaptor` provides a bridge to required v2 traits.
+- `append` and `save_vote` are durability-sensitive (must persist before the relevant completion).
+- Log index continuity is strict; no holes.
+- `truncate` and `purge` must not leave holes.
+- For non-test flows, close raft handles with `shutdown().await`.
 
-## One-line continuation note
+## Ganglion bridge notes
 
-For this repo, wire toward the above API names first, then move to richer cluster-management flows when the metadata adapter is stable.
+- `openraft::NodeId` in this stack is typically numeric (`u64` in examples), while existing ganglion node ids are string-based.
+- `CoordinationSnapshot` is already serde-serializable in `ganglion-core`.
+- Existing local adapter in `ganglion-openraft` is still not a real Raft runtime yet; this doc is specifically to keep the required OpenRaft contract pinned while continuing implementation.
+
