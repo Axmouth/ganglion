@@ -11,19 +11,22 @@ work in reverse-briefness order while keeping one live roadmap block.
 
 ### Short-term
 
-1. Complete openraft transport replacement for the consensus adapter without changing `MetadataConsensus` contracts.
-2. Add committed-snapshot publication surface and stable watcher wiring for consensus-driven consumers.
-3. Expand restart/failover and backend-sequencing assertions in persistence and control-loop scenarios.
+1. Committed-snapshot watch publication from `GanglionStateMachine` apply/install, surfaced on
+   `RaftMetadataNode` — this is fibril's actual consumption surface (`Coordination::watch()`).
+2. Durable raft storage: back raft log/vote/state with `MetadataLog` (file + Keratin) so the raft
+   path reaches durability parity with the legacy persisted node.
+3. Raft-runtime failure scenarios (leader loss/re-election, partition via router deregister,
+   restart with durable log) wired into the Jepsen fallback inventory.
 
 ### Medium-term
 
-1. Add committed-snapshot publication for external controllers/watchers.
-2. Add durability telemetry around append/clear/truncate and startup recovery outcomes.
-3. Expand partition/failover/rejoin scenario coverage with explicit choreography per backend.
+1. Membership change/learner flows on `RaftMetadataNode` (`add_learner`, `change_membership`).
+2. Epoch/fencing surface for assignments (schema design first; needs a user decision).
+3. Durability telemetry around append/clear/truncate and startup recovery outcomes.
 
 ### Long-term
 
-1. Promote strategy-configurable planner selection to user-configurable runtime configuration.
+1. Wire transport (gRPC or similar) implementing `RaftNetwork` beyond in-process.
 2. Expand persistence adapters and durable metadata maintenance tooling (retention/compaction/migration).
 3. Generalize package-level integration so queue-specific consumers stay decoupled from `ganglion` primitives.
 
@@ -379,3 +382,26 @@ work in reverse-briefness order while keeping one live roadmap block.
   surface (`append_entries`/`vote`/`install_snapshot` + `RPCOption`; `send_*` are deprecated).
 - Next: in-process `RaftNetwork`/`RaftNetworkFactory` router, then a `RaftMetadataNode` wrapping
   `Raft<GanglionRaftConfig>` behind `MetadataConsensus`.
+
+## Iteration 40 — Real raft cluster runtime + plan realignment
+
+- Added `openraft_runtime/network.rs`: `InProcessRouter` (`RaftNetworkFactory`) +
+  `InProcessConnection` (`RaftNetwork`) routing RPCs directly into peer `Raft` handles;
+  deregistered peers surface as `Unreachable` for partition simulation.
+- Added `openraft_runtime/node.rs`: `RaftMetadataNode` wrapping `Raft<GanglionRaftConfig>` with
+  `start`/`initialize`/`write_snapshot`/`committed_snapshot`/leader-wait helpers; error mapping
+  preserves `MetadataConsensus` semantics (`ForwardToLeader` → `NotLeader`, committed-but-rejected
+  stale generation → `StaleGeneration`).
+- **Milestone: 3-node in-process raft cluster test passes** — election, replicated
+  `CoordinationSnapshot` convergence on all nodes, post-consensus stale rejection, follower write
+  refusal. 41 tests green across both feature configurations.
+- Reviewed `fibril/REPLICATION_PLANNING.md` + `fibril/crates/broker/src/coordination.rs` against
+  the plan (user-requested review). Key realignments now in `PLAN.md`:
+  - fibril consumes a sync snapshot/watch trait and refuses to host consensus → committed-snapshot
+    watch publication is the integration surface and moved to short-term #1;
+  - watch-channel publication dissolves most of the sync/async bridging concern (reads become sync);
+  - durable raft storage via `MetadataLog` is the gate before the raft path can replace the legacy
+    persisted node; legacy path stays until parity;
+  - fencing/epoch surface for assignments added as a medium-term schema-design item.
+- Open decision recorded in PLAN: async `MetadataConsensus` variant vs. async-only
+  `RaftMetadataNode` API with sync watch reads.

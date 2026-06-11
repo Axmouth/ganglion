@@ -12,8 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::OpenraftAdapterError;
 
+mod network;
+mod node;
 mod storage;
 
+pub use network::{GanglionRaft, InProcessConnection, InProcessRouter};
+pub use node::RaftMetadataNode;
 pub use storage::{GanglionLogStore, GanglionStateMachine};
 
 /// Application-level write submitted through `Raft::client_write`.
