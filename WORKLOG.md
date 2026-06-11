@@ -540,3 +540,21 @@ work in reverse-briefness order while keeping one live roadmap block.
   `owns_queue`/`owner_for`/`assignment_for`/epoch path against a real raft node; post-consensus
   stale-generation rejection. Both pass; fibril workspace builds green.
 - Spike is deliberately not wired into the broker binary (etcd/static remain fibril's v1 path).
+
+## Iteration 48 — Detailed cross-repo planning pass
+
+- USER DIRECTIVE: plan fibril replication + ganglion in maximum useful detail before further
+  implementation, including a confidence test suite, a cluster playground script, CLI topology
+  visibility, and (later) an admin-page diagram.
+- Added `DESIGN.md` (ganglion, implementation-ready): G1 epoch issuance rules + guarded CAS
+  proposals + controller-loop helper (API shapes, semantics, gating tests incl. a controller
+  race test and a pre-G1 WAL compatibility fixture); G2 storage telemetry counters +
+  serializable `RaftTopology` (the JSON contract for fibril CLI/admin); G3 cluster playground
+  example + script with non-interactive smoke mode; full test-suite layer map.
+- Extended `fibril/REPLICATION_PLANNING.md` with the provider integration plan: F1 reusable
+  provider contract suite (static + ganglion must pass the same assertions); F2 controller loop
+  where raft leadership IS the controller lease, with guarded-CAS retry semantics; F3 broker
+  wiring behind a `coordination` config enum (bootstrap-once rule, string-vs-raft id split);
+  F4 `GET /topology` JSON contract + `fibril-cli topology` + admin diagram sequencing;
+  F5 coordination playground; cross-repo confidence-suite summary table.
+- Execution order stays: G1 → G2 → G3, then F1 → F5 on the fibril side.

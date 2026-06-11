@@ -20,6 +20,10 @@ provide, in priority order:
 3. Fencing/epoch data alongside assignments (fibril's split-brain defense consumes epochs).
    Schema addition needs a design pass before committing to it.
 
+Detailed, implementation-ready designs for the current phases live in `DESIGN.md` (ganglion
+phases G1–G3) and `fibril/REPLICATION_PLANNING.md` § "Ganglion coordination provider —
+integration plan" (fibril phases F1–F5).
+
 ## Active plan (non-versioned)
 
 ### 1) Openraft-backed metadata plane
