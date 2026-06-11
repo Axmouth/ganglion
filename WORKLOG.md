@@ -334,3 +334,13 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Added explicit version-bound warning that local `~/code/temp/openraft` docs/examples are newer and should
   not be used as signature authority for this repo.
 - Committed the update as `a312533` with a stable recovery-oriented layout.
+
+## Iteration 37 — Quick survival doc refresh
+
+- Replaced `OPENRAFT_SURVIVAL_CONTEXT.md` with a tighter recovery sheet focused on
+  only the methods and files required to rebuild the openraft path quickly after context compaction:
+  - `RaftTypeConfig`/`declare_raft_types` shape
+  - `RaftLogReader`, `RaftLogStorage`, `RaftStateMachine`, `RaftSnapshotBuilder`
+  - `RaftNetwork`/`RaftNetworkFactory`
+  - core lifecycle calls (`Raft::new`, `initialize`, `client_write`, `shutdown`)
+- Kept the doc intentionally minimal and version-bound for restart reliability.

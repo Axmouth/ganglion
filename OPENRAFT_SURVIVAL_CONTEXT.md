@@ -1,88 +1,96 @@
-# OpenRaft Survival Notes (0.8.9)
+# OpenRaft 0.8.9 Survival Sheet
 
-Targeted reference for quick recovery after context reset.
+Open this file first after context loss. Then open only the listed source files.
 
-## Use these files first
+## Signature anchors
 
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/raft.rs`
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/storage/v2.rs`
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/storage/mod.rs`
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/network/network.rs`
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/network/factory.rs`
-- `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/openraft-0.8.9/src/testing/suite.rs`
+- `.../openraft-0.8.9/src/raft.rs`
+- `.../openraft-0.8.9/src/storage/v2.rs`
+- `.../openraft-0.8.9/src/storage/mod.rs`
+- `.../openraft-0.8.9/src/network/network.rs`
+- `.../openraft-0.8.9/src/network/factory.rs`
+- `.../openraft-0.8.9/src/testing/suite.rs`
+- `.../openraft-0.8.9/src/node.rs`
+- `.../openraft-0.8.9/src/docs/getting_started/getting-started.md` (design notes only)
 
-Important: `/home/george/code/temp/openraft/examples/*` is newer OpenRaft. Keep this repo to 0.8 signatures.
+Keep `~/code/temp/openraft` as reference for ideas, not ABI/signature source of truth (`0.10.0-alpha.21`).
 
-## Core type definition (0.8)
+## Required type surface
 
-`openraft::RaftTypeConfig` + `openraft::declare_raft_types!`:
+```rust
+impl openraft::RaftTypeConfig for TypeConfig {
+    type D: AppData;
+    type R: AppDataResponse;
+    type NodeId: NodeId;
+    type Node: Node; // usually `BasicNode { addr: String }`
+    type Entry: RaftEntry<Self::NodeId, Self::Node> + FromAppData<Self::D>;
+    type SnapshotData: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static;
+}
+```
 
-- `D: AppData`
-- `R: AppDataResponse`
-- `NodeId: NodeId`
-- `Node: Node`
-- `Entry: RaftEntry<NodeId, Node> + FromAppData<D>`
-- `SnapshotData: AsyncRead + AsyncWrite + AsyncSeek + Send + Sync + Unpin + 'static`
+Use `openraft::declare_raft_types!(pub TypeConfig: D = ..., R = ..., NodeId = ..., Node = ..., Entry = ..., SnapshotData = ...);` if available.
 
-Typical in this repo:
-- `NodeId = u64`
-- `Node = BasicNode` for transport address metadata (`addr: String`)
+## API you must keep stable in `ganglion-openraft`
 
-## Must-have Raft calls
+### Raft API
 
+From `raft.rs`:
 - `Raft::new(id, config, network_factory, log_store, state_machine).await`
-- `Raft::initialize(members).await`
-- `Raft::client_write(app_data).await`
-- `Raft::add_learner(id, node, blocking).await`
-- `Raft::change_membership(members, retain).await`
-- inbound endpoints: `append_entries`, `vote`, `install_snapshot`
-- status: `current_leader`, `is_leader`, `shutdown().await`
+- `initialize(members)`
+- `client_write(app_data)`
+- `append_entries(rpc)`
+- `vote(rpc)`
+- `install_snapshot(rpc)`
+- `add_learner(id, node, blocking)`
+- `change_membership(members, retain)`
+- `current_leader() -> Option<NodeId>`
+- `is_leader()`
+- `shutdown().await`
 
-## Storage contracts to implement (`storage-v2`)
+`Raft` is `Clone` in spirit through `Arc` internals; operations return `RaftError`/`Raft::ClientWriteResponse` style results.
 
-`RaftLogReader<C>`
-- `get_log_state(&mut self) -> Result<LogState<C>, StorageError<C::NodeId>>`
-- `try_get_log_entries<RB: RangeBounds<u64> + ...>(&mut self, range: RB) -> Result<Vec<C::Entry>, StorageError<C::NodeId>>`
+### Storage v2
 
-`RaftLogStorage<C>`
+From `storage/v2.rs` and `storage/mod.rs`:
+
+`RaftLogReader`:
+- `get_log_state(&mut self) -> Result<LogState<C>, StorageError<NodeId>>`
+- `try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send + Sync>(&mut self, range: RB)`
+
+`RaftLogStorage`:
 - `type LogReader: RaftLogReader<C>`
 - `get_log_reader(&mut self) -> Self::LogReader`
-- `save_vote(&mut self, vote: &Vote<C::NodeId>)`
-- `read_vote(&mut self) -> Result<Option<Vote<C::NodeId>>, StorageError<C::NodeId>>`
-- `append<I>(&mut self, entries: I, callback: LogFlushed<C::NodeId>)`
-- `truncate(log_id: LogId<C::NodeId>)`
-- `purge(log_id: LogId<C::NodeId>)`
+- `save_vote(&mut self, vote: &Vote<NodeId>)`
+- `read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>>`
+- `append<I>(&mut self, entries: I, callback: LogFlushed<NodeId>)`
+- `truncate(log_id: LogId<NodeId>)`
+- `purge(log_id: LogId<NodeId>)`
 
-`RaftStateMachine<C>`
-- `applied_state(&mut self) -> Result<(Option<LogId<C::NodeId>>, StoredMembership<C::NodeId, C::Node>), StorageError<C::NodeId>>`
-- `apply<I>(&mut self, entries: I) -> Result<Vec<C::R>, StorageError<C::NodeId>>`
+`RaftStateMachine`:
+- `applied_state(&mut self) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, Node>), StorageError<NodeId>>`
+- `apply<I>(&mut self, entries: I) -> Result<Vec<R>, StorageError<NodeId>>`
 - `get_snapshot_builder(&mut self) -> Self::SnapshotBuilder`
-- `begin_receiving_snapshot(&mut self) -> Result<Box<C::SnapshotData>, StorageError<C::NodeId>>`
-- `install_snapshot(&meta: &SnapshotMeta<C::NodeId, C::Node>, snapshot: Box<C::SnapshotData>)`
-- `get_current_snapshot(&mut self) -> Result<Option<Snapshot<C>>, StorageError<C::NodeId>>`
+- `begin_receiving_snapshot(&mut self) -> Result<Box<SnapshotData>, StorageError<NodeId>>`
+- `install_snapshot(&meta, snapshot)`
+- `get_current_snapshot(&mut self) -> Result<Option<Snapshot<C>>, StorageError<NodeId>>`
 
-`RaftSnapshotBuilder<C>`
-- `build_snapshot(&mut self) -> Result<Snapshot<C>, StorageError<C::NodeId>>`
+`RaftSnapshotBuilder`:
+- `build_snapshot(&mut self) -> Result<Snapshot<C>, StorageError<NodeId>>`
 
 ## Network contracts
 
-`RaftNetwork<C>`
-- `append_entries(rpc: AppendEntriesRequest<C>, option: RPCOption) -> Result<AppendEntriesResponse<C::NodeId>, ...>`
-- `vote(rpc: VoteRequest<C::NodeId>, option: RPCOption) -> Result<VoteResponse<C::NodeId>, ...>`
-- `install_snapshot(rpc: InstallSnapshotRequest<C>, option: RPCOption) -> Result<InstallSnapshotResponse<C::NodeId>, ...>`
+From `network/network.rs`:
+- `append_entries(rpc, option: RPCOption)`
+- `vote(rpc, option: RPCOption)`
+- `install_snapshot(rpc, option: RPCOption)`
 - optional override: `backoff(&self) -> Backoff`
 
-`RaftNetworkFactory<C>`
+From `network/factory.rs`:
 - `type Network: RaftNetwork<C>`
-- `new_client(&mut self, target: C::NodeId, node: &C::Node) -> Self::Network`
+- `new_client(&mut self, target: NodeId, node: &Node) -> Network`
 
-## Validation path
+## Recovery/validation
 
-- `openraft::testing::Suite::test_all(store_or_builder)` validates storage + state machine contract.
-
-## Minimal bootstrap skeleton
-
-1. `let config = Arc::new(Config::default().validate()?)`
-2. `Raft::new(id, config, network, log_store, state_machine).await?`
-3. call `initialize(members)` for first node or add learners + change_membership for expansion
-4. expose inbound RPC handlers: `append_entries`, `vote`, `install_snapshot`
+- `openraft::testing::Suite::test_all(builder)` is the official local storage/state-machine contract check.
+- In this repo we should keep the adapter behind `cfg(feature = "openraft")` and maintain parity checks before removing the feature.
+- A node shutdown path uses `Raft::shutdown()`. Background/process hangs should be treated as external orchestration first (separate long-running invocations).
