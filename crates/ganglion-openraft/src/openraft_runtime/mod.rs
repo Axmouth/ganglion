@@ -1,9 +1,9 @@
-//! Feature-gated openraft (0.8.x) type-config scaffold.
+//! Feature-gated openraft (0.8.x) runtime integration.
 //!
-//! This module only declares the [`openraft::RaftTypeConfig`] surface and the
-//! application command/response payloads used by the eventual transport-backed
-//! `MetadataConsensus` implementation. Storage/network/state-machine adapters are
-//! added incrementally in later iterations; see `OPENRAFT_SURVIVAL_CONTEXT.md`.
+//! Declares the [`openraft::RaftTypeConfig`] surface, the application
+//! command/response payloads, and the storage adapters used by the
+//! transport-backed `MetadataConsensus` implementation. Network and runtime
+//! node wiring are added incrementally; see `OPENRAFT_SURVIVAL_CONTEXT.md`.
 
 use std::io::Cursor;
 
@@ -11,6 +11,10 @@ use ganglion_core::CoordinationSnapshot;
 use serde::{Deserialize, Serialize};
 
 use crate::OpenraftAdapterError;
+
+mod storage;
+
+pub use storage::{GanglionLogStore, GanglionStateMachine};
 
 /// Application-level write submitted through `Raft::client_write`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -20,8 +24,12 @@ pub enum MetadataRaftCommand {
 }
 
 /// Application-level response returned from the state machine.
+///
+/// `accepted` is `false` when the command was deterministically rejected
+/// (stale generation); `snapshot` always carries the post-apply committed state.
 #[derive(Debug, Clone, Eq, PartialEq, Default, Serialize, Deserialize)]
 pub struct MetadataRaftResponse {
+    pub accepted: bool,
     pub snapshot: CoordinationSnapshot,
 }
 

@@ -359,3 +359,23 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Exported the runtime module from `ganglion-openraft/src/lib.rs` via `pub` re-exports when `openraft` feature is enabled.
 - Reworked `OPENRAFT_SURVIVAL_CONTEXT.md` into a compact, restart-oriented one-pager for 0.8.9.
 - Validation update: `cargo test -p ganglion-openraft --features openraft --no-run` + `cargo test -p ganglion-openraft` both pass.
+
+## Iteration 39 — Openraft storage adapters pass contract suite
+
+- Restored the missing `openraft_runtime` module file (the iteration-38 commit referenced it but
+  the file was never written), then promoted it to a directory module.
+- Added `openraft_runtime/storage.rs` with real storage-v2 implementations for `GanglionRaftConfig`:
+  - `GanglionLogStore`: `RaftLogReader` + `RaftLogStorage` (in-memory `BTreeMap` log, vote store,
+    truncate/purge with `last_purged_log_id` tracking, immediate `LogFlushed` completion).
+  - `GanglionStateMachine`: `RaftStateMachine` + `RaftSnapshotBuilder` (applies
+    `MetadataRaftCommand`, snapshot build/install via JSON `Cursor<Vec<u8>>`).
+- `MetadataRaftResponse` gained `accepted: bool`: stale-generation writes are rejected
+  deterministically inside `apply` (state unchanged, `accepted=false`) — replicated-safe, never an error.
+- **Milestone: `openraft::testing::Suite::test_all` passes against both adapters** (storage
+  contract verified by openraft's own suite), plus a direct stale-generation rejection test.
+- Rewrote `OPENRAFT_SURVIVAL_CONTEXT.md` as a verified-facts sheet: implemented-so-far inventory,
+  compile-tested gotchas (trailing comma in `declare_raft_types!`, `LogFlushed` semantics,
+  truncate/purge boundary directions, `StorageIOError` constructors), corrected network trait
+  surface (`append_entries`/`vote`/`install_snapshot` + `RPCOption`; `send_*` are deprecated).
+- Next: in-process `RaftNetwork`/`RaftNetworkFactory` router, then a `RaftMetadataNode` wrapping
+  `Raft<GanglionRaftConfig>` behind `MetadataConsensus`.

@@ -42,6 +42,7 @@ rather than a design driver.
 - Keep openraft feature usage optional and fully gated behind explicit Cargo features.
 - Add a pluggable planner strategy registry and at least one alternate strategy implementation (`least-loaded`) with deterministic selector helpers.
 - Seed a small feature-gated openraft runtime scaffold module now; keep behavior migration to real runtime incremental and backward compatible.
+- Storage adapters (`GanglionLogStore`/`GanglionStateMachine`) are contract-verified via `openraft::testing::Suite`; remaining transport work is network factory + runtime node wrapper.
 
 ## Short-term roadmap
 
