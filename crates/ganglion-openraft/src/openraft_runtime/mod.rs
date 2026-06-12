@@ -50,6 +50,23 @@ pub enum MetadataRaftCommand {
     RegisterNode { node: ganglion_core::NodeInfo },
     /// Remove one node record (if present). Bumps the generation when it was.
     DeregisterNode { node_id: String },
+    /// Add one resource to the cluster catalogue (idempotent merge).
+    /// Bumps the generation when newly added.
+    RegisterResource {
+        resource: ganglion_core::ResourceIdentity,
+    },
+    /// Remove one resource from the catalogue. Bumps the generation when it
+    /// was present. Does NOT touch any existing assignment for it — retiring
+    /// placements is the controller's job.
+    DeregisterResource {
+        resource: ganglion_core::ResourceIdentity,
+    },
+    /// Set (insert or replace) one cluster attribute (idempotent merge; a
+    /// same-value write does not bump the generation). Consumers own their
+    /// versioning rules inside the value.
+    SetAttribute { key: String, value: String },
+    /// Remove one cluster attribute (if present).
+    RemoveAttribute { key: String },
 }
 
 /// Deterministic state-machine rejection reasons.

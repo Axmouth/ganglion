@@ -32,6 +32,10 @@ struct PersistedMetadataLogEntry {
 struct PersistedCoordinationSnapshot {
     pub nodes: BTreeMap<String, ganglion_core::NodeInfo>,
     pub assignments: BTreeMap<String, PartitionAssignment>,
+    #[serde(default)]
+    pub resources: std::collections::BTreeSet<ganglion_core::ResourceIdentity>,
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
     pub generation: u64,
 }
 
@@ -82,6 +86,8 @@ fn encode_snapshot(
     Ok(PersistedCoordinationSnapshot {
         nodes: snapshot.nodes.clone(),
         assignments,
+        resources: snapshot.resources.clone(),
+        attributes: snapshot.attributes.clone(),
         generation: snapshot.generation,
     })
 }
@@ -102,6 +108,8 @@ fn decode_snapshot(
     Ok(CoordinationSnapshot {
         nodes: snapshot.nodes,
         assignments,
+        resources: snapshot.resources,
+        attributes: snapshot.attributes,
         generation: snapshot.generation,
     })
 }

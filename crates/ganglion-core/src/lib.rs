@@ -251,6 +251,17 @@ pub fn stamp_assignment_epochs(
 pub struct CoordinationSnapshot {
     pub nodes: BTreeMap<String, NodeInfo>,
     pub assignments: BTreeMap<ResourceIdentity, PartitionAssignment>,
+    /// Cluster queue/resource catalogue: declared resources that want
+    /// assignments. Kept separate from `assignments` (catalogue ≠ placement);
+    /// the controller assigns owners/followers for catalogue entries.
+    /// `serde(default)` keeps pre-catalogue snapshots/WALs loading.
+    #[serde(default)]
+    pub resources: BTreeSet<ResourceIdentity>,
+    /// Cluster-level attribute store for consumer-defined replicated settings
+    /// (e.g. fibril runtime settings). Values are opaque to ganglion;
+    /// consumers own their versioning/conflict rules inside the value.
+    #[serde(default)]
+    pub attributes: BTreeMap<String, String>,
     pub generation: u64,
 }
 
@@ -259,6 +270,8 @@ impl Default for CoordinationSnapshot {
         Self {
             nodes: BTreeMap::new(),
             assignments: BTreeMap::new(),
+            resources: BTreeSet::new(),
+            attributes: BTreeMap::new(),
             generation: 0,
         }
     }
@@ -368,6 +381,8 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
                 snapshot: CoordinationSnapshot {
                     nodes: input.nodes,
                     assignments: BTreeMap::new(),
+                    resources: BTreeSet::new(),
+                    attributes: BTreeMap::new(),
                     generation: input.generation,
                 },
             });
@@ -409,6 +424,8 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
             snapshot: CoordinationSnapshot {
                 nodes: input.nodes,
                 assignments,
+                resources: BTreeSet::new(),
+                attributes: BTreeMap::new(),
                 generation: input.generation,
             },
         })
@@ -434,6 +451,8 @@ impl PartitionPlacementPolicy for LeastLoadedPartitionPlacement {
                 snapshot: CoordinationSnapshot {
                     nodes: input.nodes,
                     assignments: BTreeMap::new(),
+                    resources: BTreeSet::new(),
+                    attributes: BTreeMap::new(),
                     generation: input.generation,
                 },
             });
@@ -488,6 +507,8 @@ impl PartitionPlacementPolicy for LeastLoadedPartitionPlacement {
             snapshot: CoordinationSnapshot {
                 nodes: input.nodes,
                 assignments,
+                resources: BTreeSet::new(),
+                attributes: BTreeMap::new(),
                 generation: input.generation,
             },
         })
@@ -950,6 +971,7 @@ mod tests {
             nodes: sample_nodes(),
             assignments: BTreeMap::new(),
             generation: 0,
+            ..CoordinationSnapshot::default()
         };
         let plan = resolved
             .plan(PlacementInput {

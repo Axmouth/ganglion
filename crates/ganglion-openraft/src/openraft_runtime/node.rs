@@ -337,6 +337,46 @@ where
         .await
     }
 
+    /// Add one resource to the cluster catalogue (leader-only merge).
+    pub async fn register_resource(
+        &self,
+        resource: ganglion_core::ResourceIdentity,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::RegisterResource { resource })
+            .await
+    }
+
+    /// Remove one resource from the catalogue (leader-only merge).
+    pub async fn deregister_resource(
+        &self,
+        resource: ganglion_core::ResourceIdentity,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::DeregisterResource { resource })
+            .await
+    }
+
+    /// Set one cluster attribute (leader-only merge; same-value writes no-op).
+    pub async fn set_attribute(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::SetAttribute {
+            key: key.into(),
+            value: value.into(),
+        })
+        .await
+    }
+
+    /// Remove one cluster attribute (leader-only merge).
+    pub async fn remove_attribute(
+        &self,
+        key: impl Into<String>,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::RemoveAttribute { key: key.into() })
+            .await
+    }
+
     /// Committed coordination snapshot as applied on this node.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.state_machine.committed_snapshot()

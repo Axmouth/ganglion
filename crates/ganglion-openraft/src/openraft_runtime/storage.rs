@@ -362,6 +362,35 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
+                MetadataRaftCommand::RegisterResource { resource } => {
+                    if inner.state.resources.insert(resource) {
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
+                MetadataRaftCommand::DeregisterResource { resource } => {
+                    if inner.state.resources.remove(&resource) {
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
+                MetadataRaftCommand::SetAttribute { key, value } => {
+                    if inner.state.attributes.get(&key) != Some(&value) {
+                        inner.state.attributes.insert(key, value);
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
+                MetadataRaftCommand::RemoveAttribute { key } => {
+                    if inner.state.attributes.remove(&key).is_some() {
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
             };
 
             if snapshot.generation < inner.state.generation {
@@ -506,6 +535,91 @@ mod tests {
             assert_eq!(replies[1].snapshot.generation, 3);
             assert_eq!(sm.committed_snapshot(), fresh);
             assert_eq!(sm.last_applied().map(|id| id.index), Some(2));
+        });
+    }
+
+    /// Catalogue + attribute merge commands: idempotent, generation bumps
+    /// only on real changes, never touch assignments.
+    #[test]
+    fn merge_commands_update_catalogue_and_attributes() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut sm = GanglionStateMachine::default();
+            let leader = openraft::CommittedLeaderId::new(1, 0);
+            let mut index = 0u64;
+            let mut entry = |command: MetadataRaftCommand| {
+                index += 1;
+                vec![Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(leader, index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            let resource =
+                ganglion_core::ResourceIdentity::new("fibril/queue", "orders", 0, None::<String>);
+
+            let replies = sm
+                .apply(entry(MetadataRaftCommand::RegisterResource {
+                    resource: resource.clone(),
+                }))
+                .await
+                .expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(sm.committed_snapshot().generation, 1);
+            assert!(sm.committed_snapshot().resources.contains(&resource));
+
+            // Idempotent re-register: no generation bump.
+            sm.apply(entry(MetadataRaftCommand::RegisterResource {
+                resource: resource.clone(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 1);
+
+            // Attributes: set, same-value no-op, change, remove.
+            sm.apply(entry(MetadataRaftCommand::SetAttribute {
+                key: "runtime_settings".into(),
+                value: "v1".into(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 2);
+            sm.apply(entry(MetadataRaftCommand::SetAttribute {
+                key: "runtime_settings".into(),
+                value: "v1".into(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                2,
+                "same-value set is a no-op"
+            );
+            sm.apply(entry(MetadataRaftCommand::SetAttribute {
+                key: "runtime_settings".into(),
+                value: "v2".into(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 3);
+            assert_eq!(
+                sm.committed_snapshot().attributes.get("runtime_settings"),
+                Some(&"v2".to_string())
+            );
+
+            sm.apply(entry(MetadataRaftCommand::DeregisterResource { resource }))
+                .await
+                .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 4);
+            assert!(sm.committed_snapshot().resources.is_empty());
+            sm.apply(entry(MetadataRaftCommand::RemoveAttribute {
+                key: "runtime_settings".into(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 5);
+            assert!(sm.committed_snapshot().attributes.is_empty());
         });
     }
 

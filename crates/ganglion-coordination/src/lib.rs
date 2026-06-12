@@ -220,6 +220,7 @@ mod tests {
             nodes,
             assignments,
             generation: 7,
+            ..CoordinationSnapshot::default()
         }
     }
 

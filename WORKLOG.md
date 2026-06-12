@@ -688,3 +688,21 @@ work in reverse-briefness order while keeping one live roadmap block.
 - `FAILURE_MODES.md` statuses updated; added the operator runbook section (corrupt-state
   recovery, address changes, id-reuse rule, single-bootstrap rule, no-leader triage).
 - Remaining open there: asymmetric-partition chaos (2.3), leader-on-minority end-to-end (2.2).
+
+## Iteration 55 — R1 (ganglion side): cluster catalogue + replicated attributes
+
+- USER DECISIONS: separate `resources` set (confirmed); promote-to-local-tail with quorum-tails
+  documented as later exploration (not a foundation crossroad); progress-aware failover
+  candidate selection required (heartbeat-label tails interim); Stroma runtime settings must
+  replicate too → generic `attributes` KV added in the same schema change.
+- `CoordinationSnapshot` gained `resources: BTreeSet<ResourceIdentity>` and
+  `attributes: BTreeMap<String, String>`, both `serde(default)` (pre-existing WAL/snapshot files
+  load unchanged; legacy `ganglion-storage` persistence round-trips them).
+- New merge commands + node methods: `RegisterResource`/`DeregisterResource` (idempotent;
+  dereg does not touch assignments — retiring placements is the controller's job),
+  `SetAttribute`/`RemoveAttribute` (same-value set is a generation no-op; values opaque,
+  consumers own versioning).
+- Semantics test `merge_commands_update_catalogue_and_attributes`; 64 green.
+- Note for snapshot-replace writers (controller loops): they must preserve `resources` and
+  `attributes` from the committed snapshot — fibril's `control_iteration` does this (R1 fibril
+  side, next).

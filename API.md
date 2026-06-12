@@ -124,10 +124,18 @@ This file tracks what each part of the current scaffolding is meant to do.
 - `GanglionRaftConfig`
   - `openraft::RaftTypeConfig` for the metadata raft group
     (`NodeId = u64`, `Node = BasicNode`, `SnapshotData = Cursor<Vec<u8>>`).
+- `CoordinationSnapshot` now carries `resources: BTreeSet<ResourceIdentity>` (cluster catalogue)
+  and `attributes: BTreeMap<String, String>` (opaque replicated settings), both serde-default
+  (old WALs/snapshots load unchanged). Snapshot-replace writers must preserve them.
 - `MetadataRaftCommand` / `MetadataRaftResponse` / `MetadataRejection`
-  - App payloads: `ApplySnapshot(CoordinationSnapshot)` and
+  - App payloads: `ApplySnapshot(CoordinationSnapshot)`,
     `ApplySnapshotGuarded { expected_generation, snapshot }` (CAS — commits only if the committed
-    generation still matches; checked inside the replicated apply, race-free by construction).
+    generation still matches; checked inside the replicated apply, race-free by construction),
+    and merge commands that cannot clobber concurrent updates:
+    `RegisterNode`/`DeregisterNode`, `RegisterResource`/`DeregisterResource`,
+    `SetAttribute`/`RemoveAttribute` (same-value sets are generation no-ops). Node methods:
+    `register_node`, `deregister_node`, `register_resource`, `deregister_resource`,
+    `set_attribute`, `remove_attribute`.
   - Response: `accepted: bool`, `rejection: Option<MetadataRejection>`
     (`StaleGeneration` | `GenerationMismatch { expected, actual }`), committed `snapshot`.
 - `GanglionLogStore`
