@@ -391,6 +391,22 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
+                MetadataRaftCommand::CompareAndSetAttribute {
+                    key,
+                    expected,
+                    value,
+                } => {
+                    let actual = inner.state.attributes.get(&key).cloned();
+                    if actual != expected {
+                        return Some(MetadataRejection::AttributeMismatch { key, actual });
+                    }
+                    if actual.as_ref() != Some(&value) {
+                        inner.state.attributes.insert(key, value);
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
             };
 
             if snapshot.generation < inner.state.generation {
@@ -620,6 +636,54 @@ mod tests {
             .expect("apply");
             assert_eq!(sm.committed_snapshot().generation, 5);
             assert!(sm.committed_snapshot().attributes.is_empty());
+
+            // CAS attribute: create-if-absent, wrong-expected rejection with
+            // the actual value reported, matching-expected succeeds.
+            let replies = sm
+                .apply(entry(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: "settings".into(),
+                    expected: None,
+                    value: "v1".into(),
+                }))
+                .await
+                .expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(sm.committed_snapshot().generation, 6);
+
+            let replies = sm
+                .apply(entry(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: "settings".into(),
+                    expected: Some("stale".into()),
+                    value: "v2".into(),
+                }))
+                .await
+                .expect("apply");
+            assert_eq!(
+                replies[0].rejection,
+                Some(MetadataRejection::AttributeMismatch {
+                    key: "settings".into(),
+                    actual: Some("v1".into()),
+                })
+            );
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                6,
+                "rejected CAS writes nothing"
+            );
+
+            let replies = sm
+                .apply(entry(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: "settings".into(),
+                    expected: Some("v1".into()),
+                    value: "v2".into(),
+                }))
+                .await
+                .expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(
+                sm.committed_snapshot().attributes.get("settings"),
+                Some(&"v2".to_string())
+            );
         });
     }
 
@@ -762,9 +826,10 @@ mod tests {
                             _ => None,
                         };
 
+                        let expect_accept = expected_rejection.is_none();
+                        prop_assert_eq!(reply.accepted, expect_accept);
                         prop_assert_eq!(reply.rejection, expected_rejection);
-                        prop_assert_eq!(reply.accepted, expected_rejection.is_none());
-                        if expected_rejection.is_none() {
+                        if expect_accept {
                             model_generation = *generation;
                         }
                         prop_assert_eq!(reply.snapshot.generation, model_generation);

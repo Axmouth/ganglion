@@ -67,15 +67,26 @@ pub enum MetadataRaftCommand {
     SetAttribute { key: String, value: String },
     /// Remove one cluster attribute (if present).
     RemoveAttribute { key: String },
+    /// Set an attribute only if its current value matches `expected`
+    /// (`None` = must be absent). The check runs inside the replicated apply,
+    /// so concurrent writers cannot interleave — this is the race-safe path
+    /// for replicated settings documents that carry their own versioning.
+    CompareAndSetAttribute {
+        key: String,
+        expected: Option<String>,
+        value: String,
+    },
 }
 
 /// Deterministic state-machine rejection reasons.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum MetadataRejection {
     /// Snapshot generation is older than the committed one.
     StaleGeneration,
     /// Guarded write lost the CAS race: committed generation moved on.
     GenerationMismatch { expected: u64, actual: u64 },
+    /// Attribute CAS lost the race: the current value differs from `expected`.
+    AttributeMismatch { key: String, actual: Option<String> },
 }
 
 /// Application-level response returned from the state machine.

@@ -3,8 +3,8 @@
 //! Frame layout: `[1-byte format tag][4-byte BE body length][body]`.
 //! The tag selects the body encoding — receivers always accept both formats,
 //! senders choose via [`WireFormat`] (MessagePack by default; JSON for
-//! debugging, e.g. `GANGLION_WIRE_FORMAT=json`). This makes format transitions
-//! and mixed-version clusters a non-event.
+//! debugging), passed from the caller's startup configuration. This makes
+//! format transitions and mixed-version clusters a non-event.
 //!
 //! Peer addresses travel in raft membership (`BasicNode.addr`), so the network
 //! factory needs no static peer table. Connections are lazy and re-established
@@ -44,16 +44,6 @@ pub enum WireFormat {
 impl WireFormat {
     const TAG_MSGPACK: u8 = 0x01;
     const TAG_JSON: u8 = 0x02;
-
-    /// Convenience for binaries/examples: honor `GANGLION_WIRE_FORMAT`
-    /// (json|msgpack, default msgpack). Libraries must not call this — wire
-    /// formats flow through startup configuration.
-    pub fn from_env() -> Self {
-        match std::env::var("GANGLION_WIRE_FORMAT").as_deref() {
-            Ok("json") => Self::Json,
-            _ => Self::MessagePack,
-        }
-    }
 
     fn tag(self) -> u8 {
         match self {

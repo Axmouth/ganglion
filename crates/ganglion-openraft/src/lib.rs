@@ -22,6 +22,11 @@ pub enum OpenraftAdapterError {
         expected: u64,
         actual: u64,
     },
+    /// Attribute CAS lost the race: current value differed from expected.
+    AttributeMismatch {
+        key: String,
+        actual: Option<String>,
+    },
     PoisonedState,
     StaleTerm,
     Planner(PlacementError),
@@ -39,6 +44,10 @@ impl fmt::Display for OpenraftAdapterError {
             Self::GenerationMismatch { expected, actual } => write!(
                 f,
                 "guarded write expected generation {expected} but found {actual}"
+            ),
+            Self::AttributeMismatch { key, actual } => write!(
+                f,
+                "attribute CAS on `{key}` found unexpected value {actual:?}"
             ),
             Self::PoisonedState => f.write_str("consensus state lock was poisoned"),
             Self::StaleTerm => f.write_str("proposal term is older than current leader term"),
@@ -2348,6 +2357,7 @@ mod tests {
                 | Err(OpenraftAdapterError::NotLeader)
                 | Err(OpenraftAdapterError::StaleGeneration)
                 | Err(OpenraftAdapterError::GenerationMismatch { .. })
+                | Err(OpenraftAdapterError::AttributeMismatch { .. })
                 | Err(OpenraftAdapterError::StaleTerm) => {
                     prop_assert!(false, "unexpected constructor error variant");
                 }

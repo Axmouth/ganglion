@@ -310,6 +310,9 @@ where
             Some(super::MetadataRejection::GenerationMismatch { expected, actual }) => {
                 Err(OpenraftAdapterError::GenerationMismatch { expected, actual })
             }
+            Some(super::MetadataRejection::AttributeMismatch { key, actual }) => {
+                Err(OpenraftAdapterError::AttributeMismatch { key, actual })
+            }
         }
     }
 
@@ -372,6 +375,23 @@ where
     ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
         self.submit_command(MetadataRaftCommand::SetAttribute {
             key: key.into(),
+            value: value.into(),
+        })
+        .await
+    }
+
+    /// Attribute CAS (leader-only): set `key` to `value` only if its current
+    /// value equals `expected` (`None` = absent). Lost races surface as
+    /// `OpenraftAdapterError::AttributeMismatch` carrying the actual value.
+    pub async fn compare_and_set_attribute(
+        &self,
+        key: impl Into<String>,
+        expected: Option<String>,
+        value: impl Into<String>,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::CompareAndSetAttribute {
+            key: key.into(),
+            expected,
             value: value.into(),
         })
         .await
