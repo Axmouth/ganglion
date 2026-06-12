@@ -16,7 +16,7 @@ use openraft::{BasicNode, Config, Raft};
 use crate::OpenraftAdapterError;
 
 use super::{
-    GanglionLogStore, GanglionRaftConfig, GanglionRaftOf, GanglionStateMachine, InProcessRouter,
+    GanglionLogStore, GanglionRaftConfig, GanglionStateMachine, InProcessRouter,
     MetadataRaftCommand, MetadataRaftResponse,
 };
 
@@ -49,16 +49,19 @@ pub struct RaftTopology {
     pub committed_generation: u64,
 }
 
-/// One raft-backed metadata node living inside a process-local cluster.
+/// One raft-backed metadata node.
 ///
-/// Generic over the raft log store: `GanglionLogStore` (in-memory, default) or
-/// `FileRaftLogStore` (durable WAL).
-pub struct RaftMetadataNode<LS = GanglionLogStore>
+/// Generic over the raft log store (`GanglionLogStore` in-memory default,
+/// `FileRaftLogStore` durable WAL) and the network factory (`InProcessRouter`
+/// default for same-process clusters, `TcpNetworkFactory` for real
+/// multi-process clusters).
+pub struct RaftMetadataNode<LS = GanglionLogStore, NF = InProcessRouter<LS>>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: openraft::RaftNetworkFactory<GanglionRaftConfig>,
 {
     id: NodeId,
-    raft: GanglionRaftOf<LS>,
+    raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
     state_machine: GanglionStateMachine,
     log_telemetry: Option<Arc<super::StorageTelemetry>>,
 }
@@ -86,19 +89,59 @@ impl RaftMetadataNode<super::FileRaftLogStore> {
         router: &InProcessRouter<super::FileRaftLogStore>,
         dir: impl AsRef<std::path::Path>,
     ) -> Result<Self, OpenraftAdapterError> {
-        let dir = dir.as_ref();
-        std::fs::create_dir_all(dir)
-            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
-        let log_store = super::FileRaftLogStore::open(dir.join("raft-wal.jsonl"))
-            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
-        let state_machine = GanglionStateMachine::persistent(dir.join("snapshot.json"))
-            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let (log_store, state_machine) = open_durable_storage(dir)?;
         let log_telemetry = log_store.telemetry_handle();
         let mut node =
             Self::start_with_storage(id, config, router, log_store, state_machine).await?;
         node.log_telemetry = Some(log_telemetry);
         Ok(node)
     }
+}
+
+impl RaftMetadataNode<super::FileRaftLogStore, super::TcpNetworkFactory> {
+    /// Start a durable node reachable over TCP: storage under `dir`, raft RPCs
+    /// served on `listen_addr` (the address other members must carry in their
+    /// `BasicNode.addr` for this node).
+    ///
+    /// Returns the node plus the listener handle; dropping the handle stops
+    /// serving. Peers are dialed from membership addresses — no static peer
+    /// table.
+    pub async fn start_durable_tcp(
+        id: NodeId,
+        config: Arc<Config>,
+        listen_addr: impl tokio::net::ToSocketAddrs,
+        dir: impl AsRef<std::path::Path>,
+    ) -> Result<(Self, super::TcpRaftServer), OpenraftAdapterError> {
+        let (log_store, state_machine) = open_durable_storage(dir)?;
+        let log_telemetry = log_store.telemetry_handle();
+        let mut node = Self::start_with_network(
+            id,
+            config,
+            super::TcpNetworkFactory::new(),
+            log_store,
+            state_machine,
+        )
+        .await?;
+        node.log_telemetry = Some(log_telemetry);
+
+        let server = super::TcpRaftServer::bind(listen_addr, node.raft.clone())
+            .await
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        Ok((node, server))
+    }
+}
+
+fn open_durable_storage(
+    dir: impl AsRef<std::path::Path>,
+) -> Result<(super::FileRaftLogStore, GanglionStateMachine), OpenraftAdapterError> {
+    let dir = dir.as_ref();
+    std::fs::create_dir_all(dir)
+        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+    let log_store = super::FileRaftLogStore::open(dir.join("raft-wal.jsonl"))
+        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+    let state_machine = GanglionStateMachine::persistent(dir.join("snapshot.json"))
+        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+    Ok((log_store, state_machine))
 }
 
 impl<LS> RaftMetadataNode<LS>
@@ -130,10 +173,29 @@ where
         log_store: LS,
         state_machine: GanglionStateMachine,
     ) -> Result<Self, OpenraftAdapterError> {
-        let raft = Raft::new(id, config, router.clone(), log_store, state_machine.clone())
+        let node =
+            Self::start_with_network(id, config, router.clone(), log_store, state_machine).await?;
+        router.register(id, node.raft.clone());
+        Ok(node)
+    }
+}
+
+impl<LS, NF> RaftMetadataNode<LS, NF>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: openraft::RaftNetworkFactory<GanglionRaftConfig>,
+{
+    /// Start a node over an arbitrary network factory (TCP, in-process, ...).
+    pub async fn start_with_network(
+        id: NodeId,
+        config: Arc<Config>,
+        network: NF,
+        log_store: LS,
+        state_machine: GanglionStateMachine,
+    ) -> Result<Self, OpenraftAdapterError> {
+        let raft = Raft::new(id, config, network, log_store, state_machine.clone())
             .await
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
-        router.register(id, raft.clone());
         Ok(Self {
             id,
             raft,
@@ -387,7 +449,7 @@ where
     }
 
     /// Access the raw raft handle for membership changes and metrics.
-    pub fn raft(&self) -> &GanglionRaftOf<LS> {
+    pub fn raft(&self) -> &Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine> {
         &self.raft
     }
 

@@ -7,9 +7,10 @@ edition = "2021"
 ganglion-core = { path = "../ganglion-core" }
 ganglion-storage = { path = "../ganglion-storage" }
 openraft = { version = "0.8", optional = true, default-features = false, features = ["serde", "storage-v2"] }
-tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "io-util"] }
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
+rmp-serde = { version = "1", optional = true }
 
 [dev-dependencies]
 ganglion-coordination = { path = "../ganglion-coordination" }
@@ -17,7 +18,7 @@ proptest = "1"
 
 [features]
 default = []
-openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json"]
+openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json", "dep:rmp-serde"]
 
 [[example]]
 name = "cluster_demo"

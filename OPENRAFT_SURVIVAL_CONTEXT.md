@@ -46,8 +46,15 @@ its signatures (e.g. `declare_raft_types` with `LeaderId`, `SnapshotDataOf`) do 
   that's why durable deployments must use `start_durable`/`persistent`, not bare
   `FileRaftLogStore` alone. Restart: never re-`initialize`.
 
-Still to build: membership change/learner flows, raft failure scenarios in Jepsen inventory,
-wire transport.
+- `openraft_runtime/tcp.rs`: real wire transport. Frame = `[1-byte format tag][u32 BE len][body]`;
+  body msgpack (default) or JSON (`GANGLION_WIRE_FORMAT=json`); receivers decode both (mixed
+  clusters fine). `TcpRaftServer::bind(addr, raft)` serves; `TcpNetworkFactory` dials peers from
+  membership `BasicNode.addr` (addresses live in raft membership — restart nodes on the SAME
+  listen address). IO errors → `Unreachable` (openraft backs off) + drop conn for reconnect.
+  `RaftMetadataNode<LS, NF>` is generic over the network factory;
+  `start_durable_tcp(id, config, listen_addr, dir) -> (node, TcpRaftServer)`.
+
+Still to build: fibril F3 config wiring (multi-process fibril cluster), admin topology diagram.
 
 ## 2) Verified API gotchas (cost time once; don't rediscover)
 

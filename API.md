@@ -148,10 +148,12 @@ This file tracks what each part of the current scaffolding is meant to do.
     generic over the log store (default `GanglionLogStore`); `deregister` simulates unreachable peers.
 - `GanglionRaftOf<LS>` / `GanglionRaft`
   - Raft handle aliases (generic / default in-memory).
-- `RaftMetadataNode<LS>`
-  - Runtime node: `start` (in-memory) / `start_with_store` / `start_with_storage` (explicit state
-    machine) / `start_durable(id, config, router, dir)` (WAL + persisted snapshot under `dir`;
-    bounded restart recovery),
+- `RaftMetadataNode<LS, NF = InProcessRouter<LS>>`
+  - Runtime node, generic over log store and network factory: `start` (in-memory) /
+    `start_with_store` / `start_with_storage` / `start_with_network` (any factory) /
+    `start_durable(id, config, router, dir)` (WAL + persisted snapshot; bounded restart recovery) /
+    `start_durable_tcp(id, config, listen_addr, dir)` (real multi-process clusters; returns node +
+    `TcpRaftServer` listener handle),
     `initialize`, `write_snapshot` (maps `ForwardToLeader` → `NotLeader`, rejected stale commit →
     `StaleGeneration`), `committed_snapshot`, `watch_committed`, leader/applied-index wait helpers,
     `shutdown`. Durable restart: reopen the WAL and `start_with_store` again — do not re-`initialize`.
@@ -184,6 +186,11 @@ This file tracks what each part of the current scaffolding is meant to do.
   - Serializable per-node view of the raft group (`local_id`, `leader`, `voters`, `learners`,
     raft-id→address map, applied/snapshot indexes, committed generation). Produced sync via
     `RaftMetadataNode::topology()`. This is the JSON contract for topology CLIs/admin diagrams.
+- TCP transport (`TcpRaftServer`, `TcpNetworkFactory`, `TcpRaftConnection`, `WireFormat`)
+  - Wire frames: `[1-byte format tag][u32 BE length][body]`; body is MessagePack (default) or
+    JSON (`GANGLION_WIRE_FORMAT=json`); receivers always accept both, so mixed-format clusters
+    interoperate. Peer addresses come from membership (`BasicNode.addr`); connections are lazy
+    with reconnect-on-error, surfacing failures as `Unreachable` for raft backoff.
 
 ## Storage crate (`ganglion-storage`)
 

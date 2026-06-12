@@ -618,3 +618,27 @@ work in reverse-briefness order while keeping one live roadmap block.
   it; script paths don't) — scenario 08 uses `../../..`.
 - Ganglion phases G1–G3 from DESIGN.md are complete. Next: fibril-side F1 (provider contract
   suite) onward.
+
+## Iteration 52 — TCP wire transport (real multi-process clusters)
+
+- USER DECISIONS: transport = TCP + length-prefixed frames (no gRPC; lowest-dependency);
+  body encoding = MessagePack with a **single-byte per-frame format tag** (user's design):
+  receivers always decode both msgpack and JSON, senders choose via `WireFormat`
+  (`GANGLION_WIRE_FORMAT=json` for debugging) — mixed-format clusters work by construction.
+  Durable files stay JSON-lines for ops debuggability (fsync-dominated; serialization cost is
+  noise); file-format msgpack noted as possible follow-up.
+- Added `openraft_runtime/tcp.rs`: frame codec (`[tag][u32 BE length][body]`, 64 MiB cap),
+  `TcpRaftServer` (accept loop dispatching into the local `Raft` handle, per-connection tasks),
+  `TcpNetworkFactory`/`TcpRaftConnection` (`RaftNetwork` impl; peer addresses come from
+  membership `BasicNode.addr` — no static peer table; lazy connect, drop-and-reconnect on IO
+  error, failures surface as `Unreachable` for openraft backoff). New dep: `rmp-serde`.
+- Generalized `RaftMetadataNode<LS, NF = InProcessRouter<LS>>` over the network factory;
+  `start_with_network` is the core constructor; in-process and TCP variants wrap it.
+  `start_durable_tcp(id, config, listen_addr, dir)` returns the node + listener handle.
+- **Milestone: real-socket cluster test passes** (stable ×3): 3 durable TCP nodes on ephemeral
+  ports, election and replication over the wire, leader server+raft killed → survivors re-elect
+  and commit, killed node restarts from its WAL on the same address and catches up, topology
+  agreement across survivors. Plus a mixed-format frame roundtrip test (JSON sender ↔ msgpack
+  replier).
+- 56 tests green. Next: fibril F3 — config-driven ganglion coordination in fibril-server, then
+  `cluster-tryout.sh` asserting one shared topology across real processes.

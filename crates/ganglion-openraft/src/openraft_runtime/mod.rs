@@ -16,6 +16,7 @@ mod durable;
 mod network;
 mod node;
 mod storage;
+mod tcp;
 
 /// Re-export of the underlying raft crate so consumers can name trait bounds
 /// (`openraft::storage::RaftLogStorage`), `BasicNode`, `Config`, etc. without
@@ -26,6 +27,7 @@ pub use durable::FileRaftLogStore;
 pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
 pub use node::{RaftMetadataNode, RaftTopology};
 pub use storage::{GanglionLogStore, GanglionStateMachine};
+pub use tcp::{TcpNetworkFactory, TcpRaftConnection, TcpRaftServer, WireFormat};
 
 /// Application-level write submitted through `Raft::client_write`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
