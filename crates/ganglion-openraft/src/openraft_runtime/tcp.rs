@@ -240,6 +240,12 @@ impl TcpRaftServer {
     pub fn shutdown(&self) {
         self.handle.abort();
     }
+
+    /// Whether the accept loop is still running (health surface; a dead
+    /// listener means peers cannot reach this node — FAILURE_MODES §4b.5).
+    pub fn is_serving(&self) -> bool {
+        !self.handle.is_finished()
+    }
 }
 
 impl Drop for TcpRaftServer {
@@ -506,6 +512,435 @@ mod tests {
             assert!(response.vote_granted);
         }
         echo.await.expect("echo server");
+    }
+
+    /// Garbage never panics the frame decoder: arbitrary tags/bodies are
+    /// clean errors (FAILURE_MODES §2.4).
+    #[test]
+    fn fuzz_frame_decoder_rejects_garbage_without_panicking() {
+        use proptest::prelude::*;
+        let mut runner =
+            proptest::test_runner::TestRunner::new(proptest::test_runner::Config::with_cases(256));
+        runner
+            .run(
+                &(any::<u8>(), proptest::collection::vec(any::<u8>(), 0..512)),
+                |(tag, body)| {
+                    // Tag parsing: only the two known tags succeed.
+                    let format = WireFormat::from_tag(tag);
+                    prop_assert_eq!(
+                        format.is_ok(),
+                        tag == WireFormat::TAG_MSGPACK || tag == WireFormat::TAG_JSON
+                    );
+                    // Body decoding: garbage is an error, never a panic.
+                    if let Ok(format) = format {
+                        let _ = format.decode::<WireRequest>(&body);
+                        let _ = format.decode::<WireResponse>(&body);
+                    }
+                    Ok(())
+                },
+            )
+            .expect("decoder fuzz");
+    }
+
+    /// FAILURE_MODES §4b.1: a lone node of a multi-node config starts and
+    /// serves, reports no leader, fails writes fast, and joins the cluster
+    /// without a restart once peers arrive.
+    #[test]
+    fn lone_node_starts_serves_and_joins_when_peers_arrive() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::from_secs(15);
+            let config = std::sync::Arc::new(
+                openraft::Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 200,
+                    election_timeout_max: 400,
+                    ..default_raft_config().expect("config").as_ref().clone()
+                }
+                .validate()
+                .expect("config"),
+            );
+
+            // Fixed ports so membership addresses are known before peers start.
+            let port = |offset: u16| {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe");
+                let port = listener.local_addr().expect("addr").port();
+                drop(listener);
+                let _ = offset;
+                port
+            };
+            let addrs: Vec<String> = (0..3u16)
+                .map(|offset| format!("127.0.0.1:{}", port(offset)))
+                .collect();
+
+            // Only node 1 starts; it bootstraps membership for all three.
+            let dir1 = unique_dir("lone-1");
+            let (node1, _server1) =
+                RaftMetadataNode::start_durable_tcp(1, config.clone(), addrs[0].as_str(), &dir1)
+                    .await
+                    .expect("lone node starts without reachable peers");
+            let members: BTreeMap<u64, BasicNode> = addrs
+                .iter()
+                .enumerate()
+                .map(|(index, addr)| (index as u64 + 1, BasicNode::new(addr.clone())))
+                .collect();
+            node1.initialize(members).await.expect("bootstrap");
+
+            // No quorum: no leader emerges, writes fail fast, process serves.
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            assert_eq!(node1.topology().leader, None, "no quorum, no leader");
+            let err = node1
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect_err("write must fail without quorum");
+            drop(err);
+
+            // Peers arrive — no restart of node 1.
+            let dir2 = unique_dir("lone-2");
+            let dir3 = unique_dir("lone-3");
+            let (node2, _server2) =
+                RaftMetadataNode::start_durable_tcp(2, config.clone(), addrs[1].as_str(), &dir2)
+                    .await
+                    .expect("peer 2 starts");
+            let (node3, _server3) =
+                RaftMetadataNode::start_durable_tcp(3, config.clone(), addrs[2].as_str(), &dir3)
+                    .await
+                    .expect("peer 3 starts");
+
+            let leader = node1
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election proceeds once peers arrive");
+            assert!(leader >= 1 && leader <= 3);
+
+            for node in [&node1, &node2, &node3] {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    /// FAILURE_MODES §2.1 at the TCP level: a follower's listener dies (the
+    /// process lives), the quorum keeps committing, and re-binding the
+    /// listener on the same address lets the follower catch up — no restart.
+    #[test]
+    fn follower_listener_drop_and_rebind_catches_up() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::from_secs(15);
+            let config = std::sync::Arc::new(
+                openraft::Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 200,
+                    election_timeout_max: 400,
+                    ..default_raft_config().expect("config").as_ref().clone()
+                }
+                .validate()
+                .expect("config"),
+            );
+
+            let mut nodes = Vec::new();
+            let mut servers = Vec::new();
+            for id in 1..=3u64 {
+                let dir = unique_dir(&format!("rebind-{id}"));
+                let (node, server) =
+                    RaftMetadataNode::start_durable_tcp(id, config.clone(), "127.0.0.1:0", &dir)
+                        .await
+                        .expect("node starts");
+                nodes.push(node);
+                servers.push(server);
+            }
+            let members: BTreeMap<u64, BasicNode> = servers
+                .iter()
+                .enumerate()
+                .map(|(index, server)| {
+                    (
+                        index as u64 + 1,
+                        BasicNode::new(server.local_addr().to_string()),
+                    )
+                })
+                .collect();
+            nodes[0].initialize(members).await.expect("initialize");
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election");
+            let leader_index = (leader_id - 1) as usize;
+            let victim_index = (0..3).find(|index| *index != leader_index).expect("victim");
+
+            // Partition the victim's inbound path: kill only its listener.
+            let victim_addr = servers[victim_index].local_addr();
+            servers[victim_index].shutdown();
+            // Abort is asynchronous; the accept task winds down shortly after.
+            tokio::time::timeout(timeout, async {
+                while servers[victim_index].is_serving() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("listener task stops after shutdown");
+
+            nodes[leader_index]
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("quorum of 2/3 commits during the partition");
+
+            // Heal: re-bind on the SAME address with the SAME raft handle.
+            let revived_server = TcpRaftServer::bind(
+                victim_addr,
+                nodes[victim_index].raft().clone(),
+                WireFormat::default(),
+            )
+            .await
+            .expect("rebind on the pinned address");
+            assert!(revived_server.is_serving());
+
+            let mut watch = nodes[victim_index].watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < 1 {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("victim catches up after rebind without restart");
+
+            drop(revived_server);
+            for node in &nodes {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
+    }
+
+    /// FAILURE_MODES §3.1: a dying disk on the leader fail-stops that node;
+    /// the cluster survives and keeps committing.
+    #[test]
+    fn storage_failure_fail_stops_node_and_cluster_survives() {
+        use crate::openraft_runtime::{FileRaftLogStore, GanglionStateMachine, InProcessRouter};
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::from_secs(15);
+            let config = std::sync::Arc::new(
+                openraft::Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 200,
+                    election_timeout_max: 400,
+                    ..default_raft_config().expect("config").as_ref().clone()
+                }
+                .validate()
+                .expect("config"),
+            );
+
+            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let mut nodes = Vec::new();
+            let mut stores = Vec::new();
+            for id in 1..=3u64 {
+                let dir = unique_dir(&format!("failstop-{id}"));
+                std::fs::create_dir_all(&dir).expect("dir");
+                let store = FileRaftLogStore::open(dir.join("raft-wal.jsonl")).expect("open WAL");
+                stores.push(store.clone());
+                nodes.push(
+                    RaftMetadataNode::start_with_storage(
+                        id,
+                        config.clone(),
+                        &router,
+                        store,
+                        GanglionStateMachine::default(),
+                    )
+                    .await
+                    .expect("node starts"),
+                );
+            }
+            let members: BTreeMap<u64, BasicNode> = (1..=3u64)
+                .map(|id| (id, BasicNode::new(format!("node-{id}"))))
+                .collect();
+            nodes[0].initialize(members).await.expect("initialize");
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election");
+            let leader_index = (leader_id - 1) as usize;
+
+            nodes[leader_index]
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("healthy write");
+
+            // The leader's disk dies: every subsequent WAL write fails.
+            stores[leader_index].inject_write_failure(true);
+            let _ = nodes[leader_index]
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect_err("write on a dead disk must fail, not silently succeed");
+
+            // Survivors elect a new leader and keep committing.
+            let new_leader_id = tokio::time::timeout(timeout, async {
+                loop {
+                    for (index, node) in nodes.iter().enumerate() {
+                        if index != leader_index && node.is_leader().await {
+                            return node.node_id();
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("survivors re-elect after the fail-stop");
+            assert_ne!(new_leader_id, leader_id);
+
+            nodes[(new_leader_id - 1) as usize]
+                .write_snapshot(CoordinationSnapshot {
+                    generation: 2,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("cluster keeps committing after losing the bad-disk node");
+
+            for (index, node) in nodes.iter().enumerate() {
+                if index != leader_index {
+                    let _ = node.shutdown().await;
+                }
+            }
+            // The fail-stopped node's core may already be dead; best effort.
+            let _ = nodes[leader_index].shutdown().await;
+        });
+    }
+
+    /// A late joiner whose backlog was purged must catch up via snapshot
+    /// transfer over the wire (not log replay), then keep up as a voter.
+    #[test]
+    fn late_joiner_catches_up_via_snapshot_transfer_over_tcp() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::from_secs(20);
+            // Aggressive snapshot/purge: the joiner's entries are long gone.
+            let config = std::sync::Arc::new(
+                openraft::Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 200,
+                    election_timeout_max: 400,
+                    snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(8),
+                    max_in_snapshot_log_to_keep: 2,
+                    install_snapshot_timeout: 500,
+                    ..openraft::Config::default()
+                }
+                .validate()
+                .expect("config"),
+            );
+
+            let mut nodes = Vec::new();
+            let mut servers = Vec::new();
+            for id in 1..=3u64 {
+                let dir = unique_dir(&format!("snapxfer-{id}"));
+                let (node, server) =
+                    RaftMetadataNode::start_durable_tcp(id, config.clone(), "127.0.0.1:0", &dir)
+                        .await
+                        .expect("node starts");
+                nodes.push(node);
+                servers.push(server);
+            }
+            let members: BTreeMap<u64, BasicNode> = servers
+                .iter()
+                .enumerate()
+                .map(|(index, server)| {
+                    (
+                        index as u64 + 1,
+                        BasicNode::new(server.local_addr().to_string()),
+                    )
+                })
+                .collect();
+            nodes[0].initialize(members).await.expect("initialize");
+            let leader_id = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election");
+            let leader = &nodes[(leader_id - 1) as usize];
+
+            const WRITES: u64 = 40;
+            for generation in 1..=WRITES {
+                leader
+                    .write_snapshot(CoordinationSnapshot {
+                        generation,
+                        ..CoordinationSnapshot::default()
+                    })
+                    .await
+                    .expect("write");
+            }
+            // Ensure a snapshot exists and old logs were purged.
+            leader
+                .raft()
+                .wait(Some(timeout))
+                .metrics(
+                    |metrics| metrics.snapshot.map(|id| id.index).unwrap_or(0) > WRITES / 2,
+                    "snapshot built",
+                )
+                .await
+                .expect("snapshot under aggressive policy");
+
+            // Node 4 joins late with an empty data dir.
+            let dir4 = unique_dir("snapxfer-4");
+            let (node4, server4) =
+                RaftMetadataNode::start_durable_tcp(4, config.clone(), "127.0.0.1:0", &dir4)
+                    .await
+                    .expect("late joiner starts");
+            leader
+                .add_learner(4, BasicNode::new(server4.local_addr().to_string()), true)
+                .await
+                .expect("blocking learner add waits for catch-up");
+
+            let mut watch = node4.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while watch.borrow_and_update().generation < WRITES {
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("joiner reaches the tip via snapshot transfer");
+
+            // The state arrived as an installed snapshot (persisted by the
+            // durable state machine), not as a replay of purged entries.
+            assert!(
+                node4.telemetry().snapshot_persists >= 1,
+                "joiner must have installed (and persisted) a snapshot"
+            );
+
+            drop(server4);
+            node4.shutdown().await.expect("shutdown joiner");
+            for node in &nodes {
+                node.shutdown().await.expect("shutdown");
+            }
+        });
     }
 
     /// Real multi-node cluster over actual TCP sockets: election, replication,

@@ -81,6 +81,9 @@ pub struct FileRaftLogStore {
     path: PathBuf,
     inner: Arc<Mutex<DurableInner>>,
     telemetry: Arc<StorageTelemetry>,
+    /// Test-only failure injection (FAILURE_MODES §3.1): when set, write paths
+    /// fail like a dying disk so fail-stop behavior can be asserted.
+    fail_writes: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FileRaftLogStore {
@@ -143,6 +146,7 @@ impl FileRaftLogStore {
             path,
             inner: Arc::new(Mutex::new(DurableInner { state, file })),
             telemetry,
+            fail_writes: Arc::default(),
         };
         if needs_compaction {
             let mut inner = store.inner.lock().unwrap();
@@ -163,6 +167,20 @@ impl FileRaftLogStore {
             .write_all(&line)
             .and_then(|()| inner.file.sync_data())
             .map_err(|error| StorageIOError::write_logs(&error))?;
+        Ok(())
+    }
+
+    /// Simulate a dying disk: all subsequent writes fail (test hook).
+    #[doc(hidden)]
+    pub fn inject_write_failure(&self, fail: bool) {
+        self.fail_writes
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn check_injected_failure(&self) -> std::io::Result<()> {
+        if self.fail_writes.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("injected write failure"));
+        }
         Ok(())
     }
 
@@ -223,6 +241,8 @@ impl FileRaftLogStore {
         &self,
         entries: impl IntoIterator<Item = Entry<GanglionRaftConfig>>,
     ) -> Result<(), StorageError<NodeId>> {
+        self.check_injected_failure()
+            .map_err(|error| StorageIOError::write_logs(&error))?;
         let mut inner = self.inner.lock().unwrap();
         let mut batch = Vec::new();
         let mut staged = Vec::new();
@@ -297,6 +317,8 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
+        self.check_injected_failure()
+            .map_err(|error| StorageIOError::write_vote(&error))?;
         let mut inner = self.inner.lock().unwrap();
         Self::write_record(&mut inner, &WalRecord::Vote(*vote))?;
         self.telemetry

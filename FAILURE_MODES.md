@@ -42,8 +42,7 @@ A failure is only "handled" when every layer that sees it does the right thing.
   re-syncing the node from peers (wipe data dir, rejoin as learner). Document as runbook.
 - Snapshot file: tmp + fsync + rename + dir-fsync; a crash leaves old or new, never torn.
   Covered: `fuzz_persistent_state_machine_reload_matches_last_persisted`, atomic-write code
-  paths; NEEDED: an explicit torn-tmp-file-present-on-restart test (leftover `.tmp` must be
-  ignored/overwritten).
+  paths, and `persistent_state_machine_ignores_leftover_tmp_file`.
 
 ## 2. Network failures
 
@@ -51,9 +50,9 @@ A failure is only "handled" when every layer that sees it does the right thing.
 - Behavior: minority cannot elect (no quorum) or commit; its last committed snapshot stays
   readable (stale-read window — see §6). Majority side keeps operating.
 - Healing: minority rejoins, higher term observed, catches up via entries or snapshot.
-- Covered: `partitioned_follower_rejoins_and_catches_up` (in-process router deregister).
-  NEEDED: TCP-level partition test (drop listener while keeping process alive; assert rejoin
-  via reconnect path) — closer to a real netsplit than process kill.
+- Covered: `partitioned_follower_rejoins_and_catches_up` (in-process router deregister) and
+  `follower_listener_drop_and_rebind_catches_up` (TCP: listener killed while the process lives,
+  quorum commits through it, rebind on the pinned address catches up without restart).
 
 ### 2.2 Symmetric partition, leader on minority side
 - Behavior: old leader steps down on election timeout without quorum acks (cannot commit);
@@ -76,8 +75,8 @@ A failure is only "handled" when every layer that sees it does the right thing.
   next RPC reconnects. No frame resync needed because connections are request/response.
 - Oversized/garbage frames: 64 MiB cap + unknown-tag rejection close the connection; peer
   retries with backoff. Malicious peers are out of scope (see §7 trust model).
-- Covered: codec errors map to `Unreachable` by construction; `frames_roundtrip_in_both_formats`.
-  NEEDED: fuzz the frame decoder with truncated/garbage byte strings (cheap proptest).
+- Covered: codec errors map to `Unreachable` by construction; `frames_roundtrip_in_both_formats`;
+  `fuzz_frame_decoder_rejects_garbage_without_panicking` (256 cases of arbitrary tags/bodies).
 
 ## 3. Disk failures
 
@@ -86,9 +85,9 @@ A failure is only "handled" when every layer that sees it does the right thing.
   openraft treats storage errors as fatal for the node (correct: cannot promise durability).
   The node stops participating; cluster continues if quorum survives.
 - Recovery: fix disk, restart node; strict replay validates the WAL.
-- NEEDED: failure-injection test (e.g. WAL on a full tmpfs or an injectable writer) asserting
-  the node fails stopped, not corrupted, and the cluster survives. Telemetry should expose the
-  failure (`fsyncs` stalls); consider an explicit `last_storage_error` field.
+- Covered: `storage_failure_fail_stops_node_and_cluster_survives` (injected write failure on
+  the leader's WAL: the write errors, the node drops out, survivors re-elect and keep
+  committing). Telemetry `last_storage_error` field remains a nice-to-have.
 
 ### 3.2 Corrupt WAL at startup
 - Behavior: strict replay rejects malformed or unknown records; startup fails with a precise
@@ -99,7 +98,7 @@ A failure is only "handled" when every layer that sees it does the right thing.
 
 ### 3.3 Corrupt snapshot file at startup
 - Behavior: `GanglionStateMachine::persistent` fails loudly. Same runbook as 3.2.
-- NEEDED: test (corrupt snapshot.json + intact WAL → startup error, not silent default state).
+- Covered: `persistent_state_machine_rejects_corrupt_snapshot_file`.
 
 ### 3.4 Disk-full during WAL compaction / snapshot persist
 - tmp-file write fails → error propagates, original file untouched (rename never happens).
@@ -145,9 +144,8 @@ around it is not what it expects.
 - Detection: `fibrilctl topology` shows `leader=none`; logs show `Unreachable` retries with
   backoff. NEEDED: a `coordination_healthy` flag in the admin overview (leader known within the
   last N seconds) so operators and health checks see it without reading raft logs.
-- NEEDED test: start one node of a 3-node config alone; assert (a) process serves, (b) topology
-  reports no leader, (c) writes fail fast with a clear error, (d) once peers arrive, election
-  proceeds with no restart.
+- Covered: `lone_node_starts_serves_and_joins_when_peers_arrive` (starts alone, no leader,
+  write fails, peers arrive, election proceeds with no restart).
 
 ### 4b.2 Partial peer reachability at startup (can see some, not all)
 - Quorum reachable → normal operation; the missing peer joins later via catch-up (covered by
@@ -229,13 +227,29 @@ around it is not what it expects.
 
 ## Verification backlog (rolled up)
 
-1. TCP-level partition + asymmetric-partition chaos tests (2.1/2.3).
-2. Frame-decoder fuzz with truncated/garbage input (2.4).
-3. Storage failure injection: fsync error → node stops, cluster survives (3.1, 3.4).
-4. Corrupt snapshot-file startup test + leftover `.tmp` test (1.3, 3.3).
-5. Double-bootstrap divergence detection note + runbook (4.1, 4.2, 4.3).
-6. Provider forwarder liveness surface (5.4).
-7. Lone-node startup test: serves, reports no leader, fails writes fast, joins without restart
-   once peers appear (4b.1).
-8. `coordination_healthy` admin/health surface + listener-liveness exposure (4b.1, 4b.5).
-9. Heartbeat-TTL vs election-time interaction: no mass false-dead after leaderless gaps (4b.6).
+1. DONE: TCP-level partition test (2.1). Asymmetric-partition chaos remains future work (2.3).
+2. DONE: frame-decoder fuzz (2.4).
+3. DONE: storage failure injection — fail-stop + cluster survival (3.1, 3.4).
+4. DONE: corrupt snapshot-file startup test + leftover `.tmp` test (1.3, 3.3).
+5. Runbook section below covers double-bootstrap / address change / id reuse (4.1–4.3).
+6. DONE (fibril): provider `forwarder_alive` surface (5.4).
+7. DONE: lone-node startup test (4b.1).
+8. DONE (fibril): `coordination_healthy` in the topology raft block + listener liveness (4b.1, 4b.5).
+9. Heartbeat-TTL vs election gaps: policy documented (TTL must exceed worst-case election +
+   retry); provider TTL filtering covered by `registration_merges_and_liveness_filters`.
+10. DONE: snapshot-transfer-over-TCP for late joiners
+   (`late_joiner_catches_up_via_snapshot_transfer_over_tcp`).
+
+## Operator runbook (quick reference)
+
+- **Node disk corrupt / WAL or snapshot fails startup**: do NOT hand-edit files. Wipe that
+  node's coordination data dir and restart on the same address; it rejoins and catches up via
+  entries or snapshot transfer (verified by the late-joiner test).
+- **Node address must change**: addresses live in raft membership. Either restart on the old
+  pinned address, or run a membership change (`add_learner` with the new address, promote,
+  remove the old id). Never just move the process.
+- **Never reuse a raft id with a different/stale data dir** — data dir and raft id are a unit.
+- **Exactly one node bootstraps** (`bootstrap = true`); two bootstrap nodes with disjoint peer
+  sets create two clusters. Symptom: topology voter sets disagree across nodes.
+- **No leader for a long time**: check listener liveness (`raft` block in topology shows
+  `healthy:false`), peer reachability/firewalls, and that a quorum of configured peers is up.

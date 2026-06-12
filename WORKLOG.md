@@ -664,3 +664,27 @@ work in reverse-briefness order while keeping one live roadmap block.
   verification backlog (6 items) feeding future scenarios.
 - Full-suite note: one transient failure of `learner_joins_catches_up_and_gets_promoted` under
   parallel load, not reproducible across 5 subsequent full runs; bump its waits if it recurs.
+
+## Iteration 54 — Failure-mode verification backlog (ganglion side)
+
+- USER DIRECTIVE: work down the FAILURE_MODES backlog (then replication data plane).
+- New tests, all green (63 total on the openraft feature):
+  - `fuzz_frame_decoder_rejects_garbage_without_panicking` — 256 cases of arbitrary tags/bodies;
+    only the two known tags parse; garbage bodies are clean errors.
+  - `lone_node_starts_serves_and_joins_when_peers_arrive` — §4b.1 end to end: starts alone,
+    bootstraps membership, no leader without quorum, writes fail fast, peers arrive, election
+    proceeds with no restart.
+  - `persistent_state_machine_rejects_corrupt_snapshot_file` and
+    `persistent_state_machine_ignores_leftover_tmp_file` — §3.3/§1.3.
+  - `follower_listener_drop_and_rebind_catches_up` — TCP-level partition: only the listener
+    dies, quorum commits through it, rebind on the pinned address catches up; uses the new
+    `TcpRaftServer::is_serving()` health surface.
+  - `storage_failure_fail_stops_node_and_cluster_survives` — injected WAL write failure
+    (`FileRaftLogStore::inject_write_failure` test hook) on the leader: write errors, node
+    drops out, survivors re-elect and keep committing.
+  - `late_joiner_catches_up_via_snapshot_transfer_over_tcp` — empty-dir node joins after the
+    backlog was purged; catches up via wire snapshot transfer (asserted through the persisted
+    snapshot install). Slow (~22s, openraft transfer scheduling); acceptable once per suite.
+- `FAILURE_MODES.md` statuses updated; added the operator runbook section (corrupt-state
+  recovery, address changes, id-reuse rule, single-bootstrap rule, no-leader triage).
+- Remaining open there: asymmetric-partition chaos (2.3), leader-on-minority end-to-end (2.2).

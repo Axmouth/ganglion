@@ -509,6 +509,64 @@ mod tests {
         });
     }
 
+    /// FAILURE_MODES §3.3: a corrupt snapshot file fails startup loudly —
+    /// never silently degrades to default state.
+    #[test]
+    fn persistent_state_machine_rejects_corrupt_snapshot_file() {
+        let path = std::env::temp_dir().join(format!(
+            "ganglion-corrupt-snap-{}-{:?}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"{definitely not a snapshot").expect("write corrupt file");
+        assert!(
+            GanglionStateMachine::persistent(&path).is_err(),
+            "corrupt snapshot must fail startup"
+        );
+    }
+
+    /// FAILURE_MODES §1.3: a leftover `.tmp` from a crashed persist is
+    /// ignored on load and harmlessly overwritten by the next persist.
+    #[test]
+    fn persistent_state_machine_ignores_leftover_tmp_file() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "ganglion-tmp-leftover-{}-{:?}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            // Simulate a crash mid-persist: torn tmp present, no real file.
+            std::fs::write(path.with_extension("tmp"), b"{torn").expect("write torn tmp");
+
+            let mut sm =
+                GanglionStateMachine::persistent(&path).expect("tmp leftovers must not block");
+            sm.apply(vec![Entry::<GanglionRaftConfig> {
+                log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), 1),
+                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(
+                    CoordinationSnapshot {
+                        generation: 1,
+                        ..CoordinationSnapshot::default()
+                    },
+                )),
+            }])
+            .await
+            .expect("apply");
+            sm.build_snapshot().await.expect("persist overwrites tmp");
+
+            let reloaded = GanglionStateMachine::persistent(&path).expect("reload");
+            assert_eq!(reloaded.committed_snapshot().generation, 1);
+        });
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
