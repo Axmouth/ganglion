@@ -337,6 +337,15 @@ where
         .await
     }
 
+    /// Submit any merge command (leader-only). Provider layers that already
+    /// hold a `MetadataRaftCommand` use this instead of per-command wrappers.
+    pub async fn submit_merge(
+        &self,
+        command: MetadataRaftCommand,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(command).await
+    }
+
     /// Add one resource to the cluster catalogue (leader-only merge).
     pub async fn register_resource(
         &self,
