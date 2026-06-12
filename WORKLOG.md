@@ -689,6 +689,25 @@ work in reverse-briefness order while keeping one live roadmap block.
   recovery, address changes, id-reuse rule, single-bootstrap rule, no-leader triage).
 - Remaining open there: asymmetric-partition chaos (2.3), leader-on-minority end-to-end (2.2).
 
+## Iteration 56 — Policy review fixes: version-silent liveness refreshes
+
+- USER-PROMPTED design review vs. standards found one self-inflicted smell: every heartbeat
+  was a raft merge that bumped the global generation and woke watchers — so guarded CAS
+  writers raced heartbeats (livelock risk at larger broker counts), watchers churned, and the
+  WAL grew per beat. Standard systems (KRaft/etcd leases) keep liveness as leader soft state.
+- Minimal correct fix now: `RegisterNode` with a **label-only** change (heartbeat timestamps,
+  applied tails) updates the node record silently — no generation bump, no watch publish.
+  Liveness readers consume the committed snapshot directly, so freshness is unchanged.
+  Identity changes (new node, address moves) still bump + wake. Pinned by
+  `label_only_node_refresh_is_version_silent`.
+- Recorded as future work (not built): leader-soft-state liveness (heartbeats off the raft
+  log entirely) for large clusters; per-assignment delta writes (`SetAssignment` guarded by
+  epoch) replacing full-snapshot controller writes past ~10k queues.
+- Reuse rule adopted (user directive): domain-free provider logic (heartbeat registry,
+  versioned-attribute CAS publish, controller-loop skeleton, catalogue sync, label-based
+  candidate selection) migrates INTO ganglion on next touch — a future database should get
+  them for free.
+
 ## Iteration 55 — R1 (ganglion side): cluster catalogue + replicated attributes
 
 - USER DECISIONS: separate `resources` set (confirmed); promote-to-local-tail with quorum-tails

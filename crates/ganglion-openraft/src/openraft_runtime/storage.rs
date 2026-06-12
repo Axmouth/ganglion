@@ -350,9 +350,27 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                 // Merge commands: cannot clobber concurrent updates, so no
                 // CAS/staleness checks apply.
                 MetadataRaftCommand::RegisterNode { node } => {
-                    inner.state.nodes.insert(node.node_id.clone(), node);
-                    inner.state.generation += 1;
-                    state_changed = true;
+                    // Liveness refreshes must not churn the cluster version:
+                    // a label-only change (heartbeat timestamps, applied
+                    // tails) updates silently — no generation bump, no watch
+                    // wake-up — so guarded CAS writers never race heartbeats
+                    // and watchers only see identity/topology changes.
+                    // Liveness readers consume the committed snapshot
+                    // directly, so freshness is unaffected.
+                    match inner.state.nodes.get(&node.node_id) {
+                        Some(existing) if *existing == node => {}
+                        Some(existing)
+                            if existing.endpoint == node.endpoint
+                                && existing.admin_endpoint == node.admin_endpoint =>
+                        {
+                            inner.state.nodes.insert(node.node_id.clone(), node);
+                        }
+                        _ => {
+                            inner.state.nodes.insert(node.node_id.clone(), node);
+                            inner.state.generation += 1;
+                            state_changed = true;
+                        }
+                    }
                     return None;
                 }
                 MetadataRaftCommand::DeregisterNode { node_id } => {
@@ -684,6 +702,69 @@ mod tests {
                 sm.committed_snapshot().attributes.get("settings"),
                 Some(&"v2".to_string())
             );
+        });
+    }
+
+    /// Liveness refreshes are version-silent: label-only re-registration
+    /// neither bumps the generation nor wakes watchers (heartbeats must never
+    /// race guarded CAS writers); identity changes still do both.
+    #[test]
+    fn label_only_node_refresh_is_version_silent() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut sm = GanglionStateMachine::default();
+            let leader = openraft::CommittedLeaderId::new(1, 0);
+            let mut index = 0u64;
+            let mut entry = |command: MetadataRaftCommand| {
+                index += 1;
+                vec![Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(leader, index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            let node = |beat: &str| {
+                let mut node =
+                    ganglion_core::NodeInfo::new("broker-a", "127.0.0.1:9000", None::<String>);
+                node.labels.insert("heartbeat_unix_ms".into(), beat.into());
+                node
+            };
+
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node: node("1") }))
+                .await
+                .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 1);
+            let mut watch = sm.watch_committed();
+            watch.borrow_and_update();
+
+            // Heartbeat refresh: labels change, identity does not.
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node: node("2") }))
+                .await
+                .expect("apply");
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                1,
+                "label-only refresh must not bump the generation"
+            );
+            assert!(
+                !watch.has_changed().expect("watch open"),
+                "label-only refresh must not wake watchers"
+            );
+            // ...but the labels themselves ARE fresh for liveness readers.
+            assert_eq!(
+                sm.committed_snapshot().nodes["broker-a"].labels["heartbeat_unix_ms"],
+                "2"
+            );
+
+            // Identity change (new address): bump + wake.
+            let mut moved = node("3");
+            moved.endpoint = "127.0.0.1:9999".into();
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node: moved }))
+                .await
+                .expect("apply");
+            assert_eq!(sm.committed_snapshot().generation, 2);
+            assert!(watch.has_changed().expect("watch open"));
         });
     }
 
