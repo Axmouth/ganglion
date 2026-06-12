@@ -250,6 +250,10 @@ pub fn stamp_assignment_epochs(
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CoordinationSnapshot {
     pub nodes: BTreeMap<String, NodeInfo>,
+    /// Serialized as a sequence of `(resource, assignment)` pairs:
+    /// `ResourceIdentity` is a struct key, which JSON maps cannot express
+    /// (`key must be a string`), and the raft WAL/snapshot files are JSON.
+    #[serde(with = "assignment_pairs")]
     pub assignments: BTreeMap<ResourceIdentity, PartitionAssignment>,
     /// Cluster queue/resource catalogue: declared resources that want
     /// assignments. Kept separate from `assignments` (catalogue ≠ placement);
@@ -294,6 +298,27 @@ impl CoordinationSnapshot {
             .values()
             .filter(|assignment| assignment.is_followed_by(node_id))
             .collect()
+    }
+}
+
+/// Map<ResourceIdentity, _> as a pair sequence (JSON-safe map keys).
+mod assignment_pairs {
+    use super::{PartitionAssignment, ResourceIdentity};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<ResourceIdentity, PartitionAssignment>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(map.iter())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<ResourceIdentity, PartitionAssignment>, D::Error> {
+        let pairs = Vec::<(ResourceIdentity, PartitionAssignment)>::deserialize(deserializer)?;
+        Ok(pairs.into_iter().collect())
     }
 }
 

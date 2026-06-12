@@ -487,10 +487,14 @@ mod tests {
         });
     }
 
-    /// Pins the v1 (pre-guarded-command) WAL record encoding: WALs written
-    /// before `ApplySnapshotGuarded` existed must keep replaying. If this test
-    /// breaks, the WAL format changed incompatibly — that needs a migration,
-    /// not a fixture update.
+    /// Pins the v2 WAL record encoding. If this test breaks, the WAL format
+    /// changed incompatibly — that needs a migration, not a fixture update.
+    ///
+    /// Format history: v1 encoded `assignments` as a JSON map, which could
+    /// only ever serialize EMPTY maps (`ResourceIdentity` keys fail with
+    /// "key must be a string"), so no valid v1 WAL with assignments exists in
+    /// the wild — v2 (pair sequence) needed no migration. Snapshots with
+    /// catalogue/attribute fields stay readable via serde defaults.
     #[test]
     fn file_store_replays_pre_guarded_format_wal() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -501,7 +505,7 @@ mod tests {
             let fixture = concat!(
                 r#"{"Vote":{"leader_id":{"term":1,"node_id":7},"committed":false}}"#,
                 "\n",
-                r#"{"Entry":{"log_id":{"leader_id":{"term":1,"node_id":0},"index":1},"payload":{"Normal":{"ApplySnapshot":{"nodes":{},"assignments":{},"generation":3}}}}}"#,
+                r#"{"Entry":{"log_id":{"leader_id":{"term":1,"node_id":0},"index":1},"payload":{"Normal":{"ApplySnapshot":{"nodes":{},"assignments":[],"generation":3}}}}}"#,
                 "\n",
             );
             std::fs::write(&path, fixture).expect("write fixture WAL");
