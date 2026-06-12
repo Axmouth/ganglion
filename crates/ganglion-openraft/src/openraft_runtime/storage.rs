@@ -347,6 +347,21 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     snapshot
                 }
+                // Merge commands: cannot clobber concurrent updates, so no
+                // CAS/staleness checks apply.
+                MetadataRaftCommand::RegisterNode { node } => {
+                    inner.state.nodes.insert(node.node_id.clone(), node);
+                    inner.state.generation += 1;
+                    state_changed = true;
+                    return None;
+                }
+                MetadataRaftCommand::DeregisterNode { node_id } => {
+                    if inner.state.nodes.remove(&node_id).is_some() {
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
             };
 
             if snapshot.generation < inner.state.generation {

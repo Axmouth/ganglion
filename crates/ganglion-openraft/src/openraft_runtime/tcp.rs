@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{GanglionRaftConfig, GanglionStateMachine};
+use super::{GanglionRaftConfig, GanglionStateMachine, MetadataRaftCommand, MetadataRaftResponse};
+use crate::OpenraftAdapterError;
 
 type NodeId = u64;
 
@@ -152,6 +153,9 @@ enum WireRequest {
     AppendEntries(AppendEntriesRequest<GanglionRaftConfig>),
     Vote(VoteRequest<NodeId>),
     InstallSnapshot(InstallSnapshotRequest<GanglionRaftConfig>),
+    /// Application write forwarded to (what the sender believes is) the
+    /// leader. Lets follower processes register/heartbeat themselves.
+    ClientWrite(MetadataRaftCommand),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -161,7 +165,32 @@ enum WireResponse {
     InstallSnapshot(
         Result<InstallSnapshotResponse<NodeId>, RaftError<NodeId, InstallSnapshotError>>,
     ),
+    /// Forwarded-write outcome. `Err(NotLeader { leader_hint })` tells the
+    /// sender where to retry; other failures are flattened to a message.
+    ClientWrite(Result<MetadataRaftResponse, RemoteWriteError>),
 }
+
+/// Failure surface of a forwarded client write.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RemoteWriteError {
+    /// The contacted node is not the leader; retry at the hinted address.
+    NotLeader { leader_addr: Option<String> },
+    /// Any other raft-side failure, flattened for the wire.
+    Other(String),
+}
+
+impl std::fmt::Display for RemoteWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotLeader { leader_addr } => {
+                write!(f, "peer is not the leader (hint: {leader_addr:?})")
+            }
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RemoteWriteError {}
 
 /// Listener task serving raft RPCs for one local node.
 pub struct TcpRaftServer {
@@ -242,6 +271,18 @@ where
             WireRequest::Vote(rpc) => WireResponse::Vote(raft.vote(rpc).await),
             WireRequest::InstallSnapshot(rpc) => {
                 WireResponse::InstallSnapshot(raft.install_snapshot(rpc).await)
+            }
+            WireRequest::ClientWrite(command) => {
+                let result = match raft.client_write(command).await {
+                    Ok(response) => Ok(response.data),
+                    Err(error) => match error.forward_to_leader() {
+                        Some(forward) => Err(RemoteWriteError::NotLeader {
+                            leader_addr: forward.leader_node.as_ref().map(|node| node.addr.clone()),
+                        }),
+                        None => Err(RemoteWriteError::Other(error.to_string())),
+                    },
+                };
+                WireResponse::ClientWrite(result)
             }
         };
         write_frame(&mut stream, format, &response).await?;
@@ -354,6 +395,38 @@ impl RaftNetwork<GanglionRaftConfig> for TcpRaftConnection {
             }
             _ => Err(mismatched_response(self.target)),
         }
+    }
+}
+
+/// Send one application write to the raft node listening at `addr`.
+///
+/// Used by follower processes to forward registrations/heartbeats to the
+/// leader. The caller resolves `addr` (e.g. from `RaftTopology`) and handles
+/// `RemoteWriteError::NotLeader` by retrying at the hinted address.
+pub async fn client_write_remote(
+    addr: &str,
+    command: MetadataRaftCommand,
+    format: WireFormat,
+) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+    let call = async {
+        let mut stream = TcpStream::connect(addr).await?;
+        write_frame(&mut stream, format, &WireRequest::ClientWrite(command)).await?;
+        read_frame::<WireResponse>(&mut stream).await
+    };
+    match call.await {
+        Ok(WireResponse::ClientWrite(Ok(response))) => Ok(response),
+        Ok(WireResponse::ClientWrite(Err(RemoteWriteError::NotLeader { .. }))) => {
+            Err(OpenraftAdapterError::NotLeader)
+        }
+        Ok(WireResponse::ClientWrite(Err(RemoteWriteError::Other(message)))) => {
+            Err(OpenraftAdapterError::Storage(message))
+        }
+        Ok(_) => Err(OpenraftAdapterError::Storage(
+            "peer answered with a mismatched response variant".to_string(),
+        )),
+        Err(error) => Err(OpenraftAdapterError::Storage(format!(
+            "forwarded write to {addr} failed: {error}"
+        ))),
     }
 }
 
@@ -511,6 +584,61 @@ mod tests {
                 .expect("every node observes the write");
             }
 
+            // Registration: leader registers itself locally; a follower
+            // registers through the forwarded client-write RPC.
+            nodes[leader_index]
+                .register_node(ganglion_core::NodeInfo::new(
+                    format!("broker-{leader_id}"),
+                    "127.0.0.1:9001",
+                    None::<String>,
+                ))
+                .await
+                .expect("leader self-registration");
+
+            let follower_index = (0..3)
+                .find(|index| *index != leader_index)
+                .expect("follower");
+            let leader_addr = servers[leader_index].local_addr().to_string();
+            let response = client_write_remote(
+                &leader_addr,
+                MetadataRaftCommand::RegisterNode {
+                    node: ganglion_core::NodeInfo::new(
+                        format!("broker-{}", follower_index + 1),
+                        "127.0.0.1:9002",
+                        None::<String>,
+                    ),
+                },
+                WireFormat::MessagePack,
+            )
+            .await
+            .expect("forwarded registration commits");
+            assert!(response.accepted);
+
+            // A forwarded write sent to a NON-leader is refused as NotLeader.
+            let follower_addr = servers[follower_index].local_addr().to_string();
+            let err = client_write_remote(
+                &follower_addr,
+                MetadataRaftCommand::RegisterNode {
+                    node: ganglion_core::NodeInfo::new("nope", "127.0.0.1:1", None::<String>),
+                },
+                WireFormat::MessagePack,
+            )
+            .await
+            .expect_err("non-leader must refuse forwarded writes");
+            assert!(matches!(err, crate::OpenraftAdapterError::NotLeader));
+
+            // Both registrations are visible cluster-wide.
+            for node in &nodes {
+                let mut watch = node.watch_committed();
+                tokio::time::timeout(timeout, async {
+                    while watch.borrow_and_update().nodes.len() < 2 {
+                        watch.changed().await.expect("watch open");
+                    }
+                })
+                .await
+                .expect("registrations replicate to every node");
+            }
+
             // Kill the leader process-equivalent: stop its server + raft.
             servers[leader_index].shutdown();
             nodes[leader_index]
@@ -537,9 +665,10 @@ mod tests {
             assert_ne!(new_leader_id, leader_id);
 
             let new_leader_index = (new_leader_id - 1) as usize;
+            // Two registrations bumped the generation to 3; continue from 4.
             nodes[new_leader_index]
                 .write_snapshot(CoordinationSnapshot {
-                    generation: 2,
+                    generation: 4,
                     ..CoordinationSnapshot::default()
                 })
                 .await
@@ -560,7 +689,7 @@ mod tests {
 
             let mut watch = revived.watch_committed();
             tokio::time::timeout(timeout, async {
-                while watch.borrow_and_update().generation < 2 {
+                while watch.borrow_and_update().generation < 4 {
                     watch.changed().await.expect("watch open");
                 }
             })

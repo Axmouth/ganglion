@@ -27,7 +27,10 @@ pub use durable::FileRaftLogStore;
 pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
 pub use node::{RaftMetadataNode, RaftTopology};
 pub use storage::{GanglionLogStore, GanglionStateMachine};
-pub use tcp::{TcpNetworkFactory, TcpRaftConnection, TcpRaftServer, WireFormat};
+pub use tcp::{
+    client_write_remote, RemoteWriteError, TcpNetworkFactory, TcpRaftConnection, TcpRaftServer,
+    WireFormat,
+};
 
 /// Application-level write submitted through `Raft::client_write`.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
@@ -41,6 +44,12 @@ pub enum MetadataRaftCommand {
         expected_generation: u64,
         snapshot: CoordinationSnapshot,
     },
+    /// Merge (insert or update) one node record. Unlike the snapshot-replace
+    /// commands, this cannot clobber concurrent updates, so brokers can
+    /// register/heartbeat themselves without CAS loops. Bumps the generation.
+    RegisterNode { node: ganglion_core::NodeInfo },
+    /// Remove one node record (if present). Bumps the generation when it was.
+    DeregisterNode { node_id: String },
 }
 
 /// Deterministic state-machine rejection reasons.

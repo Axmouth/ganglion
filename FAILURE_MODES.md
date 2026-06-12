@@ -128,6 +128,62 @@ A failure is only "handled" when every layer that sees it does the right thing.
   raft cannot fully defend. Rule: data dir and raft id are a unit; never copy data dirs.
   NEEDED: prominent runbook warning (cannot be made safe by code).
 
+## 4b. Startup and connectivity failures (coordinator cannot connect / find peers)
+
+These are the "day one" and "bad morning" modes: the coordinator process is up but the cluster
+around it is not what it expects.
+
+### 4b.1 Cannot reach any peer at startup (cold start, peers down or firewalled)
+- Behavior today: startup itself SUCCEEDS — `start_durable_tcp` binds the listener and recovers
+  local state without contacting anyone (by design: raft has no "connect phase"). The node then
+  campaigns/waits; with no quorum reachable there is no leader, `write_*` fails, and the watch
+  serves the last locally-committed snapshot (or empty on first boot).
+- Broker impact (fibril): the broker MUST still serve its data plane. Policy per
+  `REPLICATION_PLANNING.md`: on coordination silence, default to the safe role — standalone
+  brokers keep the static single-node behavior; clustered brokers treat unknown assignments as
+  "not owner" rather than guessing. The provider's watch starting empty expresses exactly this.
+- Detection: `fibrilctl topology` shows `leader=none`; logs show `Unreachable` retries with
+  backoff. NEEDED: a `coordination_healthy` flag in the admin overview (leader known within the
+  last N seconds) so operators and health checks see it without reading raft logs.
+- NEEDED test: start one node of a 3-node config alone; assert (a) process serves, (b) topology
+  reports no leader, (c) writes fail fast with a clear error, (d) once peers arrive, election
+  proceeds with no restart.
+
+### 4b.2 Partial peer reachability at startup (can see some, not all)
+- Quorum reachable → normal operation; the missing peer joins later via catch-up (covered by
+  the revive path of the TCP test). Quorum NOT reachable → same as 4b.1.
+- Asymmetric reachability during startup degenerates to §2.3 (term churn until symmetric).
+
+### 4b.3 Bootstrap node absent on first boot
+- Non-bootstrap nodes start blank and wait: they never self-initialize (only `bootstrap = true`
+  initializes, exactly once). The cluster forms only when the bootstrap node arrives. This is
+  safe-by-default but silent. Detection: every node reports `leader=none`, `voters=[]`.
+  NEEDED: log a periodic, explicit "membership empty — waiting for bootstrap" line.
+
+### 4b.4 Bootstrap succeeds but peer list is wrong (typo'd address, wrong port)
+- The cluster commits membership containing a bad address; that member never joins; the
+  remaining majority operates (N=3 with one bad entry → quorum of 2 works). Repair: fix the
+  real node's listen address to match membership, or `change_membership` to the corrected
+  address. Worst case (majority of addresses wrong): no quorum → 4b.1 symptoms.
+- Detection: topology shows the voter present but its applied index never moves.
+
+### 4b.5 Coordination dies while the broker lives (listener task panic, port stolen)
+- The raft node keeps its outbound connections (it can still vote/replicate as a CLIENT of
+  peers' listeners) but peers cannot reach IT: it can never become a stable leader target and
+  will fall behind on inbound appends... in practice peers' appends fail → the node looks dead
+  to the cluster while looking alive locally. Watch keeps serving last-committed state.
+- Detection: peers' topology shows this node's applied index stalling; locally
+  `TcpRaftServer::shutdown`/abort is observable. NEEDED: expose listener liveness on
+  `RaftMetadataNode` (the server handle's `is_finished()`) and include it in the broker health
+  check alongside the forwarder-liveness item (5.4).
+
+### 4b.6 Forwarded writes (registration/heartbeat) when there is no leader
+- `client_write_remote` to a non-leader returns `NotLeader` (with a leader hint when known);
+  with no leader at all every attempt fails. Registration loops must treat this as a normal
+  retry-with-backoff condition, NOT an error to crash on — brokers keep serving and register
+  once the cluster heals. Heartbeat gaps during leaderlessness must not mark every broker dead
+  the moment a leader returns: liveness TTLs must exceed worst-case election + retry time.
+
 ## 5. Controller-level failures (fibril)
 
 ### 5.1 Leadership change mid-iteration
@@ -179,3 +235,7 @@ A failure is only "handled" when every layer that sees it does the right thing.
 4. Corrupt snapshot-file startup test + leftover `.tmp` test (1.3, 3.3).
 5. Double-bootstrap divergence detection note + runbook (4.1, 4.2, 4.3).
 6. Provider forwarder liveness surface (5.4).
+7. Lone-node startup test: serves, reports no leader, fails writes fast, joins without restart
+   once peers appear (4b.1).
+8. `coordination_healthy` admin/health surface + listener-liveness exposure (4b.1, 4b.5).
+9. Heartbeat-TTL vs election-time interaction: no mass false-dead after leaderless gaps (4b.6).

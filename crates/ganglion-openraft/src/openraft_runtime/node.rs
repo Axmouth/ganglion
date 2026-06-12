@@ -313,6 +313,30 @@ where
         }
     }
 
+    /// Merge one node record into the committed snapshot (leader-only).
+    ///
+    /// Unlike `write_snapshot`, this cannot clobber concurrent updates;
+    /// brokers use it to register and heartbeat themselves. Non-leaders should
+    /// forward via `client_write_remote` to the leader's raft address.
+    pub async fn register_node(
+        &self,
+        node: ganglion_core::NodeInfo,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::RegisterNode { node })
+            .await
+    }
+
+    /// Remove one node record from the committed snapshot (leader-only).
+    pub async fn deregister_node(
+        &self,
+        node_id: impl Into<String>,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+        self.submit_command(MetadataRaftCommand::DeregisterNode {
+            node_id: node_id.into(),
+        })
+        .await
+    }
+
     /// Committed coordination snapshot as applied on this node.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.state_machine.committed_snapshot()
