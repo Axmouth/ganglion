@@ -44,7 +44,9 @@ impl WireFormat {
     const TAG_MSGPACK: u8 = 0x01;
     const TAG_JSON: u8 = 0x02;
 
-    /// Honor `GANGLION_WIRE_FORMAT=json|msgpack` (default msgpack).
+    /// Convenience for binaries/examples: honor `GANGLION_WIRE_FORMAT`
+    /// (json|msgpack, default msgpack). Libraries must not call this — wire
+    /// formats flow through startup configuration.
     pub fn from_env() -> Self {
         match std::env::var("GANGLION_WIRE_FORMAT").as_deref() {
             Ok("json") => Self::Json,
@@ -85,6 +87,18 @@ impl WireFormat {
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
             Self::Json => serde_json::from_slice(bytes)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        }
+    }
+}
+
+impl std::str::FromStr for WireFormat {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "msgpack" | "messagepack" => Ok(Self::MessagePack),
+            "json" => Ok(Self::Json),
+            other => Err(format!("unknown wire format `{other}` (msgpack|json)")),
         }
     }
 }
@@ -157,9 +171,15 @@ pub struct TcpRaftServer {
 
 impl TcpRaftServer {
     /// Bind `listen_addr` (use port 0 for ephemeral) and serve the raft handle.
+    ///
+    /// `format` selects the encoding of this node's replies; inbound frames
+    /// are decoded by their own tag regardless. Settings policy: callers pass
+    /// the format from their startup configuration — the library reads no
+    /// environment variables.
     pub async fn bind<NF, LS>(
         listen_addr: impl tokio::net::ToSocketAddrs,
         raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
+        format: WireFormat,
     ) -> io::Result<Self>
     where
         NF: RaftNetworkFactory<GanglionRaftConfig>,
@@ -175,7 +195,7 @@ impl TcpRaftServer {
                 };
                 let raft = raft.clone();
                 tokio::spawn(async move {
-                    let _ = serve_connection(stream, raft).await;
+                    let _ = serve_connection(stream, raft, format).await;
                 });
             }
         });
@@ -202,12 +222,12 @@ impl Drop for TcpRaftServer {
 async fn serve_connection<NF, LS>(
     mut stream: TcpStream,
     raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
+    format: WireFormat,
 ) -> io::Result<()>
 where
     NF: RaftNetworkFactory<GanglionRaftConfig>,
     LS: RaftLogStorage<GanglionRaftConfig>,
 {
-    let format = WireFormat::from_env();
     loop {
         let request: WireRequest = match read_frame(&mut stream).await {
             Ok(request) => request,
@@ -235,13 +255,13 @@ pub struct TcpNetworkFactory {
 }
 
 impl TcpNetworkFactory {
-    /// Factory with the wire format taken from `GANGLION_WIRE_FORMAT`.
+    /// Factory sending MessagePack frames (the default format).
     pub fn new() -> Self {
-        Self {
-            format: WireFormat::from_env(),
-        }
+        Self::default()
     }
 
+    /// Factory sending the given format. Settings policy: pass this from
+    /// startup configuration, not from environment reads inside libraries.
     pub fn with_format(format: WireFormat) -> Self {
         Self { format }
     }

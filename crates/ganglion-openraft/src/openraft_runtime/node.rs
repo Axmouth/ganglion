@@ -112,19 +112,39 @@ impl RaftMetadataNode<super::FileRaftLogStore, super::TcpNetworkFactory> {
         listen_addr: impl tokio::net::ToSocketAddrs,
         dir: impl AsRef<std::path::Path>,
     ) -> Result<(Self, super::TcpRaftServer), OpenraftAdapterError> {
+        Self::start_durable_tcp_with_format(
+            id,
+            config,
+            listen_addr,
+            dir,
+            super::WireFormat::default(),
+        )
+        .await
+    }
+
+    /// `start_durable_tcp` with an explicit wire format for outbound frames
+    /// (both RPCs to peers and replies on the listener). Pass this from
+    /// startup configuration.
+    pub async fn start_durable_tcp_with_format(
+        id: NodeId,
+        config: Arc<Config>,
+        listen_addr: impl tokio::net::ToSocketAddrs,
+        dir: impl AsRef<std::path::Path>,
+        wire_format: super::WireFormat,
+    ) -> Result<(Self, super::TcpRaftServer), OpenraftAdapterError> {
         let (log_store, state_machine) = open_durable_storage(dir)?;
         let log_telemetry = log_store.telemetry_handle();
         let mut node = Self::start_with_network(
             id,
             config,
-            super::TcpNetworkFactory::new(),
+            super::TcpNetworkFactory::with_format(wire_format),
             log_store,
             state_machine,
         )
         .await?;
         node.log_telemetry = Some(log_telemetry);
 
-        let server = super::TcpRaftServer::bind(listen_addr, node.raft.clone())
+        let server = super::TcpRaftServer::bind(listen_addr, node.raft.clone(), wire_format)
             .await
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
         Ok((node, server))

@@ -642,3 +642,25 @@ work in reverse-briefness order while keeping one live roadmap block.
   replier).
 - 56 tests green. Next: fibril F3 — config-driven ganglion coordination in fibril-server, then
   `cluster-tryout.sh` asserting one shared topology across real processes.
+
+## Iteration 53 — Settings discipline + failure-modes catalogue
+
+- USER DIRECTIVES: settings flow through startup configuration (no env reads inside libraries);
+  plan coordination failure modes in detail.
+- Wire-format plumbing: `TcpRaftServer::bind` and `TcpNetworkFactory` now take `WireFormat`
+  explicitly; `start_durable_tcp_with_format` added; `WireFormat: FromStr` for config parsing;
+  `WireFormat::from_env` demoted to a documented binaries/examples convenience that library
+  paths never call. Fibril: `coordination.ganglion.wire_format` config field
+  (+ `FIBRIL_COORDINATION_WIRE_FORMAT` env override at the config layer, where env belongs),
+  passed down from the composition root.
+- Added `FAILURE_MODES.md`: detailed catalogue across process crashes (incl. the strict-replay
+  stance on torn WALs — bounded-tail recovery is NOT obviously safe for raft state; runbook is
+  re-sync from peers), network failures (minority/leader-minority/asymmetric partitions, frame
+  garbage), disk failures (runtime fsync errors are fatal-stop by design; corrupt files fail
+  loudly; atomic writes bound compaction/persist failures), bootstrap/operator errors
+  (double-bootstrap divergence, address changes, id reuse), controller-level failures (CAS
+  races, false liveness verdicts → epoch fencing at the data plane), staleness windows, and the
+  current trust model (raft port must be firewalled; no TLS yet). Ends with a rolled-up
+  verification backlog (6 items) feeding future scenarios.
+- Full-suite note: one transient failure of `learner_joins_catches_up_and_gets_promoted` under
+  parallel load, not reproducible across 5 subsequent full runs; bump its waits if it recurs.
