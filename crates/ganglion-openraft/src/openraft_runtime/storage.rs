@@ -705,6 +705,116 @@ mod tests {
         });
     }
 
+    /// CAS attribute guarantees relied on by replicated topic metadata /
+    /// runtime settings: create-once (expected=None fails if the key exists),
+    /// compare-update against the current value, idempotent same-value writes
+    /// (no generation bump), and expected-but-absent rejection. These are what
+    /// make concurrent writers race-safe.
+    #[test]
+    fn cas_attribute_preserves_create_once_and_idempotency() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let mut sm = GanglionStateMachine::default();
+            let leader = openraft::CommittedLeaderId::new(1, 0);
+            let mut index = 0u64;
+            let mut entry = |command: MetadataRaftCommand| {
+                index += 1;
+                vec![Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(leader, index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            let cas =
+                |expected: Option<&str>, value: &str| MetadataRaftCommand::CompareAndSetAttribute {
+                    key: "topic/orders".into(),
+                    expected: expected.map(str::to_string),
+                    value: value.into(),
+                };
+
+            // Create-once: first create-if-absent wins.
+            let replies = sm.apply(entry(cas(None, "n=4"))).await.expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(sm.committed_snapshot().generation, 1);
+
+            // Create-once: a SECOND create-if-absent must be rejected (the key
+            // already exists) — this is what stops two declarers both "creating"
+            // the same topic and clobbering each other.
+            let replies = sm.apply(entry(cas(None, "n=8"))).await.expect("apply");
+            assert_eq!(
+                replies[0].rejection,
+                Some(MetadataRejection::AttributeMismatch {
+                    key: "topic/orders".into(),
+                    actual: Some("n=4".into()),
+                })
+            );
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                1,
+                "rejected create-once writes nothing"
+            );
+
+            // Idempotent CAS: expected==actual==value -> accepted, NO bump.
+            let replies = sm
+                .apply(entry(cas(Some("n=4"), "n=4")))
+                .await
+                .expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                1,
+                "no-op CAS must not bump the generation"
+            );
+
+            // Compare-update against the current value succeeds.
+            let replies = sm
+                .apply(entry(cas(Some("n=4"), "n=8")))
+                .await
+                .expect("apply");
+            assert!(replies[0].accepted);
+            assert_eq!(sm.committed_snapshot().generation, 2);
+            assert_eq!(
+                sm.committed_snapshot().attributes.get("topic/orders"),
+                Some(&"n=8".to_string())
+            );
+
+            // Expected-but-absent: CAS expecting a value on a removed key is
+            // rejected with actual=None (never silently creates).
+            sm.apply(entry(MetadataRaftCommand::RemoveAttribute {
+                key: "topic/orders".into(),
+            }))
+            .await
+            .expect("apply");
+            let gen_after_remove = sm.committed_snapshot().generation;
+            let replies = sm
+                .apply(entry(cas(Some("n=8"), "n=9")))
+                .await
+                .expect("apply");
+            assert_eq!(
+                replies[0].rejection,
+                Some(MetadataRejection::AttributeMismatch {
+                    key: "topic/orders".into(),
+                    actual: None,
+                })
+            );
+            assert_eq!(sm.committed_snapshot().generation, gen_after_remove);
+
+            // RemoveAttribute on an absent key is a no-op (no bump).
+            let before = sm.committed_snapshot().generation;
+            sm.apply(entry(MetadataRaftCommand::RemoveAttribute {
+                key: "topic/orders".into(),
+            }))
+            .await
+            .expect("apply");
+            assert_eq!(
+                sm.committed_snapshot().generation,
+                before,
+                "removing an absent key writes nothing"
+            );
+        });
+    }
+
     /// Liveness refreshes are version-silent: label-only re-registration
     /// neither bumps the generation nor wakes watchers (heartbeats must never
     /// race guarded CAS writers); identity changes still do both.
