@@ -1,6 +1,7 @@
 # Ganglion API
 
-This file tracks what each part of the current scaffolding is meant to do.
+This file tracks the current public surface and the intended role of each crate. It is mutable while
+Ganglion is pre-release. Code wins when this file and implementation disagree.
 
 ## Core (`ganglion-core`)
 

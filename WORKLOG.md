@@ -11,24 +11,29 @@ work in reverse-briefness order while keeping one live roadmap block.
 
 ### Short-term
 
-1. Committed-snapshot watch publication from `GanglionStateMachine` apply/install, surfaced on
-   `RaftMetadataNode` — this is fibril's actual consumption surface (`Coordination::watch()`).
-2. Durable raft storage: back raft log/vote/state with `MetadataLog` (file + Keratin) so the raft
-   path reaches durability parity with the legacy persisted node.
-3. Raft-runtime failure scenarios (leader loss/re-election, partition via router deregister,
-   restart with durable log) wired into the Jepsen fallback inventory.
+1. Finish the first documentation pass: README, examples, surface inventory, current plan, and
+   runbook-oriented failure notes.
+2. Create a generic-extraction inventory for code currently living in Fibril but suitable for
+   Ganglion.
+3. Add missing failure scenarios for asymmetric partitions and leader-on-minority partitions.
+4. Add a consumer-facing example for guarded attributes and resource catalogue writes.
 
 ### Medium-term
 
-1. Membership change/learner flows on `RaftMetadataNode` (`add_learner`, `change_membership`).
-2. Epoch/fencing surface for assignments (schema design first; needs a user decision).
-3. Durability telemetry around append/clear/truncate and startup recovery outcomes.
+1. Move domain-free provider logic from Fibril into Ganglion when the boundary is clear.
+2. Replace raft-log heartbeats with leader-local soft liveness if cluster size makes heartbeat
+   commits too noisy.
+3. Add finer-grained assignment commands for large resource sets, instead of full-snapshot writes.
+4. Improve package-level examples and API docs for each crate.
+5. Keep expanding scenario coverage around partitions, restarts, membership mistakes, and disk
+   failures.
 
 ### Long-term
 
-1. Wire transport (gRPC or similar) implementing `RaftNetwork` beyond in-process.
-2. Expand persistence adapters and durable metadata maintenance tooling (retention/compaction/migration).
-3. Generalize package-level integration so queue-specific consumers stay decoupled from `ganglion` primitives.
+1. Stable crate API and versioned snapshot/migration story.
+2. Optional higher-level service wrapper for deployments that want a standalone coordination process.
+3. Operator-oriented strategy and telemetry configuration without binding to a single consumer model.
+4. Additional storage backends where they buy meaningful operational value.
 
 ### Worklog maintenance
 
@@ -725,3 +730,20 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Note for snapshot-replace writers (controller loops): they must preserve `resources` and
   `attributes` from the committed snapshot — fibril's `control_iteration` does this (R1 fibril
   side, next).
+
+## Iteration 57 — Documentation positioning pass
+
+- Added a root `README.md` positioning Ganglion as a small embeddable coordination library:
+  ownership, liveness, resource catalogue, guarded attributes, topology, and snapshot watches.
+- Added `SURFACE_INVENTORY.md` as the reverse roadmap: implemented, partial, planned, and
+  out-of-scope behavior across core model, planning, consensus, storage, transport, provider
+  layer, validation, and consumer boundaries.
+- Added `EXAMPLES.md` with rough current-API examples for resource modelling, pure placement,
+  in-memory metadata nodes, committed snapshot watches, guarded attributes, and controller loops.
+- Updated `PLAN.md` so the active plan no longer lists completed raft watch, durable storage,
+  TCP transport, epochs, membership, and telemetry work as pending.
+- Reaffirmed the boundary: Ganglion owns generic coordination primitives; consumers keep domain
+  validation, routing protocols, data-plane recovery, and application-specific settings.
+- Recorded the next extraction pass: move domain-free provider logic from Fibril into Ganglion on
+  next touch. Likely candidates are heartbeat/liveness helpers, guarded attribute publication,
+  catalogue sync, progress-label conventions, and controller-loop helpers.
