@@ -28,8 +28,8 @@ pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRo
 pub use node::{RaftMetadataNode, RaftTopology};
 pub use storage::{GanglionLogStore, GanglionStateMachine};
 pub use tcp::{
-    client_write_remote, RemoteWriteError, TcpNetworkFactory, TcpRaftConnection, TcpRaftServer,
-    WireFormat,
+    client_write_remote, client_write_remote_with_hint, RemoteWriteError, TcpNetworkFactory,
+    TcpRaftConnection, TcpRaftServer, WireFormat,
 };
 
 /// Application-level write submitted through `Raft::client_write`.

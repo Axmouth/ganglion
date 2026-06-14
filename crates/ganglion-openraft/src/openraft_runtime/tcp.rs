@@ -399,11 +399,11 @@ impl RaftNetwork<GanglionRaftConfig> for TcpRaftConnection {
 /// Used by follower processes to forward registrations/heartbeats to the
 /// leader. The caller resolves `addr` (e.g. from `RaftTopology`) and handles
 /// `RemoteWriteError::NotLeader` by retrying at the hinted address.
-pub async fn client_write_remote(
+pub async fn client_write_remote_with_hint(
     addr: &str,
     command: MetadataRaftCommand,
     format: WireFormat,
-) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+) -> Result<MetadataRaftResponse, RemoteWriteError> {
     let call = async {
         let mut stream = TcpStream::connect(addr).await?;
         write_frame(&mut stream, format, &WireRequest::ClientWrite(command)).await?;
@@ -411,18 +411,25 @@ pub async fn client_write_remote(
     };
     match call.await {
         Ok(WireResponse::ClientWrite(Ok(response))) => Ok(response),
-        Ok(WireResponse::ClientWrite(Err(RemoteWriteError::NotLeader { .. }))) => {
-            Err(OpenraftAdapterError::NotLeader)
-        }
-        Ok(WireResponse::ClientWrite(Err(RemoteWriteError::Other(message)))) => {
-            Err(OpenraftAdapterError::Storage(message))
-        }
-        Ok(_) => Err(OpenraftAdapterError::Storage(
+        Ok(WireResponse::ClientWrite(Err(error))) => Err(error),
+        Ok(_) => Err(RemoteWriteError::Other(
             "peer answered with a mismatched response variant".to_string(),
         )),
-        Err(error) => Err(OpenraftAdapterError::Storage(format!(
+        Err(error) => Err(RemoteWriteError::Other(format!(
             "forwarded write to {addr} failed: {error}"
         ))),
+    }
+}
+
+pub async fn client_write_remote(
+    addr: &str,
+    command: MetadataRaftCommand,
+    format: WireFormat,
+) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
+    match client_write_remote_with_hint(addr, command, format).await {
+        Ok(response) => Ok(response),
+        Err(RemoteWriteError::NotLeader { .. }) => Err(OpenraftAdapterError::NotLeader),
+        Err(RemoteWriteError::Other(message)) => Err(OpenraftAdapterError::Storage(message)),
     }
 }
 
