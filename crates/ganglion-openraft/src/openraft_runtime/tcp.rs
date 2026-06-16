@@ -41,6 +41,26 @@ pub enum WireFormat {
     Json,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireFormatParseError {
+    Unknown { raw: String },
+}
+
+impl std::fmt::Display for WireFormatParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown { raw } => {
+                write!(
+                    formatter,
+                    "unknown wire format `{raw}` (expected msgpack or json)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for WireFormatParseError {}
+
 impl WireFormat {
     const TAG_MSGPACK: u8 = 0x01;
     const TAG_JSON: u8 = 0x02;
@@ -83,13 +103,15 @@ impl WireFormat {
 }
 
 impl std::str::FromStr for WireFormat {
-    type Err = String;
+    type Err = WireFormatParseError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
             "msgpack" | "messagepack" => Ok(Self::MessagePack),
             "json" => Ok(Self::Json),
-            other => Err(format!("unknown wire format `{other}` (msgpack|json)")),
+            other => Err(WireFormatParseError::Unknown {
+                raw: other.to_string(),
+            }),
         }
     }
 }
@@ -467,6 +489,20 @@ mod tests {
 
     /// Both wire formats roundtrip a request frame, and a JSON sender talks to
     /// the same decoder a msgpack sender uses (mixed setups are a non-event).
+    #[test]
+    fn wire_format_parse_reports_unknown_values() {
+        assert_eq!("msgpack".parse::<WireFormat>(), Ok(WireFormat::MessagePack));
+        assert_eq!(
+            "messagepack".parse::<WireFormat>(),
+            Ok(WireFormat::MessagePack)
+        );
+        assert_eq!("json".parse::<WireFormat>(), Ok(WireFormat::Json));
+        assert_eq!(
+            "yaml".parse::<WireFormat>(),
+            Err(WireFormatParseError::Unknown { raw: "yaml".into() })
+        );
+    }
+
     #[tokio::test]
     async fn frames_roundtrip_in_both_formats() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
