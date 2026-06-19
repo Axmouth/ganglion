@@ -1,0 +1,11 @@
+[package]
+name = "ganglion"
+version = "0.1.0"
+edition = "2021"
+
+# Umbrella crate: the stable Ganglion surface that depending crates bind to,
+# so they import `ganglion` instead of reaching into backend crates like
+# `ganglion-openraft` directly.
+
+[dependencies]
+ganglion-openraft = { path = "../ganglion-openraft", features = ["openraft"] }
