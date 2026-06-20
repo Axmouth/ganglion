@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use ganglion_core::CoordinationSnapshot;
 use tokio::sync::watch;
 
-use openraft::async_trait::async_trait;
 use openraft::storage::{LogFlushed, RaftLogStorage, RaftStateMachine};
 use openraft::{
     BasicNode, Entry, EntryPayload, LogId, LogState, RaftLogReader, RaftSnapshotBuilder, Snapshot,
@@ -37,8 +36,23 @@ struct LogStoreInner {
     last_purged_log_id: Option<LogId<NodeId>>,
 }
 
-#[async_trait]
 impl RaftLogReader<GanglionRaftConfig> for GanglionLogStore {
+    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + openraft::OptionalSend>(
+        &mut self,
+        range: RB,
+    ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .log
+            .range(range)
+            .map(|(_, entry)| entry.clone())
+            .collect())
+    }
+}
+
+impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
+    type LogReader = Self;
+
     async fn get_log_state(
         &mut self,
     ) -> Result<LogState<GanglionRaftConfig>, StorageError<NodeId>> {
@@ -56,23 +70,6 @@ impl RaftLogReader<GanglionRaftConfig> for GanglionLogStore {
         })
     }
 
-    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send + Sync>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .log
-            .range(range)
-            .map(|(_, entry)| entry.clone())
-            .collect())
-    }
-}
-
-#[async_trait]
-impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
-    type LogReader = Self;
-
     async fn get_log_reader(&mut self) -> Self::LogReader {
         self.clone()
     }
@@ -89,7 +86,7 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
     async fn append<I>(
         &mut self,
         entries: I,
-        callback: LogFlushed<NodeId>,
+        callback: LogFlushed<GanglionRaftConfig>,
     ) -> Result<(), StorageError<NodeId>>
     where
         I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
@@ -271,7 +268,6 @@ impl GanglionStateMachine {
     }
 }
 
-#[async_trait]
 impl RaftSnapshotBuilder<GanglionRaftConfig> for GanglionStateMachine {
     async fn build_snapshot(
         &mut self,
@@ -304,7 +300,6 @@ impl RaftSnapshotBuilder<GanglionRaftConfig> for GanglionStateMachine {
     }
 }
 
-#[async_trait]
 impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
     type SnapshotBuilder = Self;
 
@@ -516,7 +511,6 @@ mod tests {
 
     struct InMemoryBuilder;
 
-    #[async_trait]
     impl StoreBuilder<GanglionRaftConfig, GanglionLogStore, GanglionStateMachine, ()>
         for InMemoryBuilder
     {

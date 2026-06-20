@@ -19,13 +19,13 @@ use std::time::Duration;
 
 use ganglion_core::CoordinationSnapshot;
 use ganglion_openraft::{
-    default_raft_config, openraft::BasicNode, FileRaftLogStore, InProcessRouter, RaftMetadataNode,
+    default_raft_config, openraft::BasicNode, InProcessRouter, RaftMetadataNode,
 };
 
-type Node = RaftMetadataNode<FileRaftLogStore>;
+type Node = RaftMetadataNode;
 
 struct Cluster {
-    router: InProcessRouter<FileRaftLogStore>,
+    router: InProcessRouter,
     config: Arc<ganglion_openraft::openraft::Config>,
     data_dir: std::path::PathBuf,
     nodes: BTreeMap<u64, Node>,

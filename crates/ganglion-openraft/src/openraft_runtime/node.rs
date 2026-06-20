@@ -51,22 +51,20 @@ pub struct RaftTopology {
 
 /// One raft-backed metadata node.
 ///
-/// Generic over the raft log store (`GanglionLogStore` in-memory default,
-/// `FileRaftLogStore` durable WAL) and the network factory (`InProcessRouter`
-/// default for same-process clusters, `TcpNetworkFactory` for real
-/// multi-process clusters).
-pub struct RaftMetadataNode<LS = GanglionLogStore, NF = InProcessRouter<LS>>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: openraft::RaftNetworkFactory<GanglionRaftConfig>,
-{
+/// The log store and network factory are chosen per constructor rather than as
+/// type parameters: `start`/`start_with_store` use the in-memory `GanglionLogStore`
+/// over the `InProcessRouter`, `start_durable` uses the `FileRaftLogStore` WAL, and
+/// `start_durable_tcp` uses `TcpNetworkFactory` for real multi-process clusters.
+/// Since openraft 0.9 the `Raft<C>` handle is type-erased over both, so the node
+/// itself carries no storage/network generics.
+pub struct RaftMetadataNode {
     id: NodeId,
-    raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
+    raft: Raft<GanglionRaftConfig>,
     state_machine: GanglionStateMachine,
     log_telemetry: Option<Arc<super::StorageTelemetry>>,
 }
 
-impl RaftMetadataNode<GanglionLogStore> {
+impl RaftMetadataNode {
     /// Start an in-memory node and register it on the router.
     pub async fn start(
         id: NodeId,
@@ -77,7 +75,7 @@ impl RaftMetadataNode<GanglionLogStore> {
     }
 }
 
-impl RaftMetadataNode<super::FileRaftLogStore> {
+impl RaftMetadataNode {
     /// Start a fully durable node storing its WAL and snapshot under `dir`.
     ///
     /// Recovery is bounded: restart loads `snapshot.json` and replays only the
@@ -86,7 +84,7 @@ impl RaftMetadataNode<super::FileRaftLogStore> {
     pub async fn start_durable(
         id: NodeId,
         config: Arc<Config>,
-        router: &InProcessRouter<super::FileRaftLogStore>,
+        router: &InProcessRouter,
         dir: impl AsRef<std::path::Path>,
     ) -> Result<Self, OpenraftAdapterError> {
         let (log_store, state_machine) = open_durable_storage(dir)?;
@@ -98,7 +96,7 @@ impl RaftMetadataNode<super::FileRaftLogStore> {
     }
 }
 
-impl RaftMetadataNode<super::FileRaftLogStore, super::TcpNetworkFactory> {
+impl RaftMetadataNode {
     /// Start a durable node reachable over TCP: storage under `dir`, raft RPCs
     /// served on `listen_addr` (the address other members must carry in their
     /// `BasicNode.addr` for this node).
@@ -164,17 +162,17 @@ fn open_durable_storage(
     Ok((log_store, state_machine))
 }
 
-impl<LS> RaftMetadataNode<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
+impl RaftMetadataNode {
     /// Start a node over the given log store and register it on the router.
-    pub async fn start_with_store(
+    pub async fn start_with_store<LS>(
         id: NodeId,
         config: Arc<Config>,
-        router: &InProcessRouter<LS>,
+        router: &InProcessRouter,
         log_store: LS,
-    ) -> Result<Self, OpenraftAdapterError> {
+    ) -> Result<Self, OpenraftAdapterError>
+    where
+        LS: RaftLogStorage<GanglionRaftConfig>,
+    {
         Self::start_with_storage(
             id,
             config,
@@ -186,33 +184,34 @@ where
     }
 
     /// Start a node over explicit log store and state machine instances.
-    pub async fn start_with_storage(
+    pub async fn start_with_storage<LS>(
         id: NodeId,
         config: Arc<Config>,
-        router: &InProcessRouter<LS>,
+        router: &InProcessRouter,
         log_store: LS,
         state_machine: GanglionStateMachine,
-    ) -> Result<Self, OpenraftAdapterError> {
+    ) -> Result<Self, OpenraftAdapterError>
+    where
+        LS: RaftLogStorage<GanglionRaftConfig>,
+    {
         let node =
             Self::start_with_network(id, config, router.clone(), log_store, state_machine).await?;
         router.register(id, node.raft.clone());
         Ok(node)
     }
-}
 
-impl<LS, NF> RaftMetadataNode<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: openraft::RaftNetworkFactory<GanglionRaftConfig>,
-{
     /// Start a node over an arbitrary network factory (TCP, in-process, ...).
-    pub async fn start_with_network(
+    pub async fn start_with_network<NF, LS>(
         id: NodeId,
         config: Arc<Config>,
         network: NF,
         log_store: LS,
         state_machine: GanglionStateMachine,
-    ) -> Result<Self, OpenraftAdapterError> {
+    ) -> Result<Self, OpenraftAdapterError>
+    where
+        LS: RaftLogStorage<GanglionRaftConfig>,
+        NF: openraft::RaftNetworkFactory<GanglionRaftConfig>,
+    {
         let raft = Raft::new(id, config, network, log_store, state_machine.clone())
             .await
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
@@ -428,8 +427,23 @@ where
         self.raft.current_leader().await
     }
 
+    /// Cheap local leadership check from raft metrics (this node currently
+    /// believes it is the leader). For a quorum-confirmed read barrier use
+    /// [`Self::ensure_linearizable`].
     pub async fn is_leader(&self) -> bool {
-        self.raft.is_leader().await.is_ok()
+        self.raft.current_leader().await == Some(self.id)
+    }
+
+    /// Quorum-confirmed linearizable-read barrier: returns Ok only once this
+    /// node has verified it is still the leader (replaces the deprecated
+    /// `Raft::is_leader`). This is the trustworthy-primary primitive for
+    /// read-after-write correctness.
+    pub async fn ensure_linearizable(&self) -> Result<(), OpenraftAdapterError> {
+        self.raft
+            .ensure_linearizable()
+            .await
+            .map(|_| ())
+            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))
     }
 
     /// Wait until this node observes the given leader (test/bootstrap helper).
@@ -562,7 +576,7 @@ where
     }
 
     /// Access the raw raft handle for membership changes and metrics.
-    pub fn raft(&self) -> &Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine> {
+    pub fn raft(&self) -> &Raft<GanglionRaftConfig> {
         &self.raft
     }
 
@@ -1084,8 +1098,6 @@ mod tests {
 
     #[test]
     fn durable_node_bounded_recovery_survives_purge_across_restart() {
-        use super::super::FileRaftLogStore;
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1119,7 +1131,7 @@ mod tests {
 
             const WRITES: u64 = 100;
             {
-                let router = InProcessRouter::<FileRaftLogStore>::new();
+                let router = InProcessRouter::new();
                 let node = RaftMetadataNode::start_durable(1, config.clone(), &router, &dir)
                     .await
                     .expect("durable node should start");
@@ -1173,7 +1185,7 @@ mod tests {
             );
 
             // Full restart: state must come back even though the log was purged.
-            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let router = InProcessRouter::new();
             let restarted = RaftMetadataNode::start_durable(1, config, &router, &dir)
                 .await
                 .expect("restart");
@@ -1229,7 +1241,7 @@ mod tests {
             let timeout = Duration::from_secs(10);
 
             {
-                let router = InProcessRouter::<FileRaftLogStore>::new();
+                let router = InProcessRouter::new();
                 let store = FileRaftLogStore::open(&wal_path).expect("open WAL");
                 let node = RaftMetadataNode::start_with_store(1, test_config(), &router, store)
                     .await
@@ -1258,7 +1270,7 @@ mod tests {
             // Restart from the same WAL: no initialize — membership, vote, and
             // log come from disk; the fresh in-memory state machine catches up
             // once the node re-elects itself and re-commits the log.
-            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let router = InProcessRouter::new();
             let store = FileRaftLogStore::open(&wal_path).expect("reopen WAL");
             let restarted = RaftMetadataNode::start_with_store(1, test_config(), &router, store)
                 .await

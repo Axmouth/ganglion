@@ -24,7 +24,7 @@ mod tcp;
 pub use openraft;
 
 pub use durable::FileRaftLogStore;
-pub use network::{GanglionRaft, GanglionRaftOf, InProcessConnection, InProcessRouter};
+pub use network::{GanglionRaft, InProcessConnection, InProcessRouter};
 pub use node::{RaftMetadataNode, RaftTopology};
 pub use storage::{GanglionLogStore, GanglionStateMachine};
 pub use tcp::{
@@ -109,7 +109,8 @@ openraft::declare_raft_types!(
         NodeId = u64,
         Node = openraft::BasicNode,
         Entry = openraft::Entry<GanglionRaftConfig>,
-        SnapshotData = Cursor<Vec<u8>>
+        SnapshotData = Cursor<Vec<u8>>,
+        AsyncRuntime = openraft::TokioRuntime
 );
 
 /// Fsync the parent directory of `path` so a preceding rename is durable.

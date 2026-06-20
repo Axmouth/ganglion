@@ -15,7 +15,6 @@ use std::ops::RangeBounds;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use openraft::async_trait::async_trait;
 use openraft::storage::{LogFlushed, RaftLogStorage};
 use openraft::{Entry, LogId, LogState, RaftLogReader, StorageError, StorageIOError, Vote};
 use serde::{Deserialize, Serialize};
@@ -274,8 +273,24 @@ impl FileRaftLogStore {
     }
 }
 
-#[async_trait]
 impl RaftLogReader<GanglionRaftConfig> for FileRaftLogStore {
+    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + openraft::OptionalSend>(
+        &mut self,
+        range: RB,
+    ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
+        let inner = self.inner.lock().unwrap();
+        Ok(inner
+            .state
+            .log
+            .range(range)
+            .map(|(_, entry)| entry.clone())
+            .collect())
+    }
+}
+
+impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
+    type LogReader = Self;
+
     async fn get_log_state(
         &mut self,
     ) -> Result<LogState<GanglionRaftConfig>, StorageError<NodeId>> {
@@ -293,24 +308,6 @@ impl RaftLogReader<GanglionRaftConfig> for FileRaftLogStore {
             last_log_id,
         })
     }
-
-    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send + Sync>(
-        &mut self,
-        range: RB,
-    ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
-        Ok(inner
-            .state
-            .log
-            .range(range)
-            .map(|(_, entry)| entry.clone())
-            .collect())
-    }
-}
-
-#[async_trait]
-impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
-    type LogReader = Self;
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
         self.clone()
@@ -335,7 +332,7 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     async fn append<I>(
         &mut self,
         entries: I,
-        callback: LogFlushed<NodeId>,
+        callback: LogFlushed<GanglionRaftConfig>,
     ) -> Result<(), StorageError<NodeId>>
     where
         I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
@@ -407,7 +404,6 @@ mod tests {
 
     struct FileBuilder;
 
-    #[async_trait]
     impl StoreBuilder<GanglionRaftConfig, FileRaftLogStore, super::super::GanglionStateMachine, ()>
         for FileBuilder
     {

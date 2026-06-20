@@ -9,26 +9,23 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use openraft::async_trait::async_trait;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError, RemoteError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::storage::RaftLogStorage;
 use openraft::{BasicNode, Raft, RaftNetwork, RaftNetworkFactory};
 
-use super::{GanglionLogStore, GanglionRaftConfig, GanglionStateMachine};
+use super::GanglionRaftConfig;
 
 type NodeId = u64;
 
-/// Raft handle type for an in-process cluster over log store `LS`.
-pub type GanglionRaftOf<LS> =
-    Raft<GanglionRaftConfig, InProcessRouter<LS>, LS, GanglionStateMachine>;
-
-/// Raft handle type for the default in-memory log store.
-pub type GanglionRaft = GanglionRaftOf<GanglionLogStore>;
+/// Raft handle type for the ganglion metadata group.
+///
+/// Since openraft 0.9 the `Raft` handle is type-erased over storage and network
+/// (`Raft<C>`), so a single handle type covers in-memory and durable nodes.
+pub type GanglionRaft = Raft<GanglionRaftConfig>;
 
 #[derive(Debug)]
 struct UnknownTarget(NodeId);
@@ -46,17 +43,15 @@ impl std::fmt::Display for UnknownTarget {
 impl std::error::Error for UnknownTarget {}
 
 /// Shared registry of in-process raft handles. Cheap to clone.
-pub struct InProcessRouter<LS = GanglionLogStore>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
-    targets: Arc<RwLock<BTreeMap<NodeId, GanglionRaftOf<LS>>>>,
+///
+/// The stored handles are type-erased `Raft<C>`, so a single router can serve
+/// in-memory and durable nodes without a storage type parameter.
+#[derive(Default)]
+pub struct InProcessRouter {
+    targets: Arc<RwLock<BTreeMap<NodeId, GanglionRaft>>>,
 }
 
-impl<LS> Clone for InProcessRouter<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
+impl Clone for InProcessRouter {
     fn clone(&self) -> Self {
         Self {
             targets: Arc::clone(&self.targets),
@@ -64,27 +59,13 @@ where
     }
 }
 
-impl<LS> Default for InProcessRouter<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
-    fn default() -> Self {
-        Self {
-            targets: Arc::new(RwLock::new(BTreeMap::new())),
-        }
-    }
-}
-
-impl<LS> InProcessRouter<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
+impl InProcessRouter {
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Register a node's raft handle so peers can reach it.
-    pub fn register(&self, id: NodeId, raft: GanglionRaftOf<LS>) {
+    pub fn register(&self, id: NodeId, raft: GanglionRaft) {
         self.targets.write().unwrap().insert(id, raft);
     }
 
@@ -93,17 +74,13 @@ where
         self.targets.write().unwrap().remove(&id);
     }
 
-    fn lookup(&self, id: NodeId) -> Option<GanglionRaftOf<LS>> {
+    fn lookup(&self, id: NodeId) -> Option<GanglionRaft> {
         self.targets.read().unwrap().get(&id).cloned()
     }
 }
 
-#[async_trait]
-impl<LS> RaftNetworkFactory<GanglionRaftConfig> for InProcessRouter<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
-    type Network = InProcessConnection<LS>;
+impl RaftNetworkFactory<GanglionRaftConfig> for InProcessRouter {
+    type Network = InProcessConnection;
 
     async fn new_client(&mut self, target: NodeId, _node: &BasicNode) -> Self::Network {
         InProcessConnection {
@@ -115,30 +92,20 @@ where
 
 /// A connection to one target node, resolved through the router on every call
 /// so restarts/replacements are picked up.
-pub struct InProcessConnection<LS = GanglionLogStore>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
-    router: InProcessRouter<LS>,
+pub struct InProcessConnection {
+    router: InProcessRouter,
     target: NodeId,
 }
 
-impl<LS> InProcessConnection<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
-    fn target_raft(&self) -> Result<GanglionRaftOf<LS>, Unreachable> {
+impl InProcessConnection {
+    fn target_raft(&self) -> Result<GanglionRaft, Unreachable> {
         self.router
             .lookup(self.target)
             .ok_or_else(|| Unreachable::new(&UnknownTarget(self.target)))
     }
 }
 
-#[async_trait]
-impl<LS> RaftNetwork<GanglionRaftConfig> for InProcessConnection<LS>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
+impl RaftNetwork<GanglionRaftConfig> for InProcessConnection {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<GanglionRaftConfig>,

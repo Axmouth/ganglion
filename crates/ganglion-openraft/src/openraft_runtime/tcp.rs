@@ -13,20 +13,18 @@
 
 use std::io;
 
-use openraft::async_trait::async_trait;
 use openraft::error::{InstallSnapshotError, RPCError, RaftError, RemoteError, Unreachable};
 use openraft::network::RPCOption;
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::storage::RaftLogStorage;
 use openraft::{BasicNode, Raft, RaftNetwork, RaftNetworkFactory};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{GanglionRaftConfig, GanglionStateMachine, MetadataRaftCommand, MetadataRaftResponse};
+use super::{GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse};
 use crate::OpenraftAdapterError;
 
 type NodeId = u64;
@@ -217,15 +215,11 @@ impl TcpRaftServer {
     /// are decoded by their own tag regardless. Settings policy: callers pass
     /// the format from their startup configuration — the library reads no
     /// environment variables.
-    pub async fn bind<NF, LS>(
+    pub async fn bind(
         listen_addr: impl tokio::net::ToSocketAddrs,
-        raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
+        raft: Raft<GanglionRaftConfig>,
         format: WireFormat,
-    ) -> io::Result<Self>
-    where
-        NF: RaftNetworkFactory<GanglionRaftConfig>,
-        LS: RaftLogStorage<GanglionRaftConfig>,
-    {
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(listen_addr).await?;
         let local_addr = listener.local_addr()?;
 
@@ -266,15 +260,11 @@ impl Drop for TcpRaftServer {
     }
 }
 
-async fn serve_connection<NF, LS>(
+async fn serve_connection(
     mut stream: TcpStream,
-    raft: Raft<GanglionRaftConfig, NF, LS, GanglionStateMachine>,
+    raft: Raft<GanglionRaftConfig>,
     format: WireFormat,
-) -> io::Result<()>
-where
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-    LS: RaftLogStorage<GanglionRaftConfig>,
-{
+) -> io::Result<()> {
     loop {
         let request: WireRequest = match read_frame(&mut stream).await {
             Ok(request) => request,
@@ -326,7 +316,6 @@ impl TcpNetworkFactory {
     }
 }
 
-#[async_trait]
 impl RaftNetworkFactory<GanglionRaftConfig> for TcpNetworkFactory {
     type Network = TcpRaftConnection;
 
@@ -368,7 +357,6 @@ impl TcpRaftConnection {
     }
 }
 
-#[async_trait]
 impl RaftNetwork<GanglionRaftConfig> for TcpRaftConnection {
     async fn append_entries(
         &mut self,
@@ -784,7 +772,7 @@ mod tests {
                 .expect("config"),
             );
 
-            let router = InProcessRouter::<FileRaftLogStore>::new();
+            let router = InProcessRouter::new();
             let mut nodes = Vec::new();
             let mut stores = Vec::new();
             for id in 1..=3u64 {
