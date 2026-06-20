@@ -41,7 +41,10 @@ impl RaftLogReader<GanglionRaftConfig> for GanglionLogStore {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(inner
             .log
             .range(range)
@@ -56,7 +59,10 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
     async fn get_log_state(
         &mut self,
     ) -> Result<LogState<GanglionRaftConfig>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let last_purged_log_id = inner.last_purged_log_id;
         let last_log_id = inner
             .log
@@ -75,12 +81,19 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
-        self.inner.lock().unwrap().vote = Some(*vote);
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .vote = Some(*vote);
         Ok(())
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>> {
-        Ok(self.inner.lock().unwrap().vote)
+        Ok(self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .vote)
     }
 
     async fn append<I>(
@@ -93,7 +106,10 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
         I::IntoIter: Send,
     {
         {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for entry in entries {
                 inner.log.insert(entry.log_id.index, entry);
             }
@@ -104,14 +120,20 @@ impl RaftLogStorage<GanglionRaftConfig> for GanglionLogStore {
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Keep entries strictly before `log_id.index`.
         inner.log.split_off(&log_id.index);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Purge points never move backwards.
         if inner
             .last_purged_log_id
@@ -194,7 +216,10 @@ impl GanglionStateMachine {
                     .map_err(|error| StorageIOError::read_snapshot(None, &error))?
             };
 
-            let mut inner = machine.inner.lock().unwrap();
+            let mut inner = machine
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             inner.last_applied = stored.meta.last_log_id;
             inner.last_membership = stored.meta.last_membership.clone();
             inner.state = state.clone();
@@ -251,12 +276,19 @@ impl GanglionStateMachine {
 
     /// Current committed coordination snapshot.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
-        self.inner.lock().unwrap().state.clone()
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state
+            .clone()
     }
 
     /// Last applied raft log id, if any.
     pub fn last_applied(&self) -> Option<LogId<NodeId>> {
-        self.inner.lock().unwrap().last_applied
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_applied
     }
 
     /// Subscribe to committed snapshot updates.
@@ -272,7 +304,10 @@ impl RaftSnapshotBuilder<GanglionRaftConfig> for GanglionStateMachine {
     async fn build_snapshot(
         &mut self,
     ) -> Result<Snapshot<GanglionRaftConfig>, StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let data = serde_json::to_vec(&inner.state)
             .map_err(|error| StorageIOError::read_state_machine(&error))?;
 
@@ -307,7 +342,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         &mut self,
     ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, BasicNode>), StorageError<NodeId>>
     {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok((inner.last_applied, inner.last_membership.clone()))
     }
 
@@ -319,7 +357,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
         I::IntoIter: Send,
     {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut replies = Vec::new();
         let mut state_changed = false;
 
@@ -483,7 +524,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         };
         self.persist_snapshot(&stored)?;
 
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();
         inner.state = state;
@@ -495,7 +539,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<GanglionRaftConfig>>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(inner.current_snapshot.as_ref().map(|stored| Snapshot {
             meta: stored.meta.clone(),
             snapshot: Box::new(Cursor::new(stored.data.clone())),

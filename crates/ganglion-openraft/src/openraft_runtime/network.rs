@@ -1,10 +1,8 @@
 //! In-process `RaftNetwork`/`RaftNetworkFactory` router.
 //!
 //! Routes RPCs between `Raft<GanglionRaftConfig>` instances living in the same
-//! process by calling the target's `Raft` handle directly. Generic over the log
-//! store so in-memory and durable nodes use the same transport. A wire
-//! transport can implement the same traits later without touching storage or
-//! runtime-node code.
+//! process by calling the target's `Raft` handle directly. A wire transport can
+//! implement the same traits later without touching storage or runtime-node code.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
@@ -66,16 +64,26 @@ impl InProcessRouter {
 
     /// Register a node's raft handle so peers can reach it.
     pub fn register(&self, id: NodeId, raft: GanglionRaft) {
-        self.targets.write().unwrap().insert(id, raft);
+        self.targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, raft);
     }
 
     /// Remove a node from the router, simulating an unreachable peer.
     pub fn deregister(&self, id: NodeId) {
-        self.targets.write().unwrap().remove(&id);
+        self.targets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&id);
     }
 
     fn lookup(&self, id: NodeId) -> Option<GanglionRaft> {
-        self.targets.read().unwrap().get(&id).cloned()
+        self.targets
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .cloned()
     }
 }
 

@@ -148,7 +148,10 @@ impl FileRaftLogStore {
             fail_writes: Arc::default(),
         };
         if needs_compaction {
-            let mut inner = store.inner.lock().unwrap();
+            let mut inner = store
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             store.rewrite(&mut inner)?;
         }
         Ok(store)
@@ -242,7 +245,10 @@ impl FileRaftLogStore {
     ) -> Result<(), StorageError<NodeId>> {
         self.check_injected_failure()
             .map_err(|error| StorageIOError::write_logs(&error))?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut batch = Vec::new();
         let mut staged = Vec::new();
         for entry in entries {
@@ -278,7 +284,10 @@ impl RaftLogReader<GanglionRaftConfig> for FileRaftLogStore {
         &mut self,
         range: RB,
     ) -> Result<Vec<Entry<GanglionRaftConfig>>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(inner
             .state
             .log
@@ -294,7 +303,10 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     async fn get_log_state(
         &mut self,
     ) -> Result<LogState<GanglionRaftConfig>, StorageError<NodeId>> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let last_purged_log_id = inner.state.last_purged_log_id;
         let last_log_id = inner
             .state
@@ -316,7 +328,10 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         self.check_injected_failure()
             .map_err(|error| StorageIOError::write_vote(&error))?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::write_record(&mut inner, &WalRecord::Vote(*vote))?;
         self.telemetry
             .fsyncs
@@ -326,7 +341,12 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<NodeId>>, StorageError<NodeId>> {
-        Ok(self.inner.lock().unwrap().state.vote)
+        Ok(self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state
+            .vote)
     }
 
     async fn append<I>(
@@ -354,7 +374,10 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::write_record(
             &mut inner,
             &WalRecord::Truncate {
@@ -366,7 +389,10 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Purge points never move backwards.
         if inner
             .state
