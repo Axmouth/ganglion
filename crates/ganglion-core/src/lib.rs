@@ -304,7 +304,7 @@ impl CoordinationSnapshot {
 /// Map<ResourceIdentity, _> as a pair sequence (JSON-safe map keys).
 mod assignment_pairs {
     use super::{PartitionAssignment, ResourceIdentity};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     use std::collections::BTreeMap;
 
     pub fn serialize<S: Serializer>(
