@@ -55,8 +55,8 @@ pub struct RaftTopology {
 /// type parameters: `start`/`start_with_store` use the in-memory `GanglionLogStore`
 /// over the `InProcessRouter`, `start_durable` uses the `FileRaftLogStore` WAL, and
 /// `start_durable_tcp` uses `TcpNetworkFactory` for real multi-process clusters.
-/// Since openraft 0.9 the `Raft<C>` handle is type-erased over both, so the node
-/// itself carries no storage/network generics.
+/// The `Raft<C>` handle is type-erased over both, so the node itself carries no
+/// storage/network generics.
 pub struct RaftMetadataNode {
     id: NodeId,
     raft: Raft<GanglionRaftConfig>,
@@ -435,9 +435,8 @@ impl RaftMetadataNode {
     }
 
     /// Quorum-confirmed linearizable-read barrier: returns Ok only once this
-    /// node has verified it is still the leader (replaces the deprecated
-    /// `Raft::is_leader`). This is the trustworthy-primary primitive for
-    /// read-after-write correctness.
+    /// node has verified with a quorum that it is still the leader. This is the
+    /// trustworthy-primary primitive for read-after-write correctness.
     pub async fn ensure_linearizable(&self) -> Result<(), OpenraftAdapterError> {
         self.raft
             .ensure_linearizable()

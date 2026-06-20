@@ -23,8 +23,8 @@ type NodeId = u64;
 
 /// Raft handle type for the ganglion metadata group.
 ///
-/// Since openraft 0.9 the `Raft` handle is type-erased over storage and network
-/// (`Raft<C>`), so a single handle type covers in-memory and durable nodes.
+/// The `Raft` handle is type-erased over storage and network (`Raft<C>`), so a
+/// single handle type covers both in-memory and durable nodes.
 pub type GanglionRaft = Raft<GanglionRaftConfig>;
 
 #[derive(Debug)]
