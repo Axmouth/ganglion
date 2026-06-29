@@ -12,6 +12,7 @@
 //! applies its backoff policy.
 
 use std::io;
+use std::sync::Arc;
 
 use openraft::error::{InstallSnapshotError, RPCError, RaftError, RemoteError, Unreachable};
 use openraft::network::RPCOption;
@@ -21,7 +22,7 @@ use openraft::raft::{
 };
 use openraft::{BasicNode, Raft, RaftNetwork, RaftNetworkFactory};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{GanglionRaftConfig, MetadataRaftCommand, MetadataRaftResponse};
@@ -118,8 +119,8 @@ impl std::str::FromStr for WireFormat {
 /// bounded by the coordination state size.
 const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 
-async fn write_frame<T: Serialize>(
-    stream: &mut TcpStream,
+async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(
+    stream: &mut S,
     format: WireFormat,
     value: &T,
 ) -> io::Result<()> {
@@ -138,7 +139,9 @@ async fn write_frame<T: Serialize>(
     stream.flush().await
 }
 
-async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> io::Result<T> {
+async fn read_frame<S: AsyncRead + Unpin, T: for<'de> Deserialize<'de>>(
+    stream: &mut S,
+) -> io::Result<T> {
     let mut tag = [0u8; 1];
     stream.read_exact(&mut tag).await?;
     let format = WireFormat::from_tag(tag[0])?;
@@ -260,8 +263,14 @@ impl Drop for TcpRaftServer {
     }
 }
 
-async fn serve_connection(
-    mut stream: TcpStream,
+/// Serve raft RPCs on one accepted connection until the peer closes it.
+///
+/// Generic over the stream type so the same dispatch runs over a real tokio
+/// `TcpStream` (production) or a simulated stream (tests inject their own
+/// transport and accept loop, then hand each stream here with `raft()`'s
+/// handle).
+pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     raft: Raft<GanglionRaftConfig>,
     format: WireFormat,
 ) -> io::Result<()> {
@@ -297,11 +306,87 @@ async fn serve_connection(
     }
 }
 
-/// `RaftNetworkFactory` resolving peers from membership (`BasicNode.addr`).
-#[derive(Debug, Clone, Default)]
-pub struct TcpNetworkFactory {
-    format: WireFormat,
+/// Establishes a transport stream to a raft peer at its membership address
+/// (`BasicNode.addr`). Production uses [`TokioDialer`] (real TCP); tests can
+/// inject a simulated transport (for example turmoil) without ganglion taking
+/// any test-framework dependency. The same `serve_connection` accepts the peer
+/// side, so one transport choice covers both directions.
+pub trait RaftDialer: Send + Sync + 'static {
+    /// The byte stream this dialer produces. It needs only tokio's async IO
+    /// traits, which simulated transports implement too. `Send + Sync` mirror
+    /// openraft's `RaftNetwork` bounds (real and simulated TCP both satisfy
+    /// them).
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync;
+
+    /// Connect to `addr`, returning a fresh stream.
+    fn dial(
+        &self,
+        addr: &str,
+    ) -> impl std::future::Future<Output = io::Result<Self::Stream>> + Send;
 }
+
+/// Production dialer over real TCP.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokioDialer;
+
+impl RaftDialer for TokioDialer {
+    type Stream = TcpStream;
+
+    async fn dial(&self, addr: &str) -> io::Result<Self::Stream> {
+        TcpStream::connect(addr).await
+    }
+}
+
+/// `RaftNetworkFactory` resolving peers from membership (`BasicNode.addr`) and
+/// dialing each over an injected [`RaftDialer`].
+#[derive(Debug, Clone)]
+pub struct DialerNetworkFactory<D> {
+    format: WireFormat,
+    dialer: Arc<D>,
+}
+
+impl<D: Default> Default for DialerNetworkFactory<D> {
+    fn default() -> Self {
+        Self {
+            format: WireFormat::default(),
+            dialer: Arc::new(D::default()),
+        }
+    }
+}
+
+impl<D: RaftDialer> DialerNetworkFactory<D> {
+    /// Factory over `dialer`, sending MessagePack frames (the default format).
+    pub fn with_dialer(dialer: D) -> Self {
+        Self::with_dialer_format(dialer, WireFormat::default())
+    }
+
+    /// Factory over `dialer` and an explicit outbound wire format. Settings
+    /// policy: pass the format from startup configuration, not from environment
+    /// reads inside libraries.
+    pub fn with_dialer_format(dialer: D, format: WireFormat) -> Self {
+        Self {
+            format,
+            dialer: Arc::new(dialer),
+        }
+    }
+}
+
+impl<D: RaftDialer> RaftNetworkFactory<GanglionRaftConfig> for DialerNetworkFactory<D> {
+    type Network = DialerRaftConnection<D>;
+
+    async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
+        DialerRaftConnection {
+            target,
+            addr: node.addr.clone(),
+            format: self.format,
+            dialer: self.dialer.clone(),
+            stream: None,
+        }
+    }
+}
+
+/// Production TCP network factory: peers dialed over real TCP.
+pub type TcpNetworkFactory = DialerNetworkFactory<TokioDialer>;
 
 impl TcpNetworkFactory {
     /// Factory sending MessagePack frames (the default format).
@@ -312,32 +397,20 @@ impl TcpNetworkFactory {
     /// Factory sending the given format. Settings policy: pass this from
     /// startup configuration, not from environment reads inside libraries.
     pub fn with_format(format: WireFormat) -> Self {
-        Self { format }
+        Self::with_dialer_format(TokioDialer, format)
     }
 }
 
-impl RaftNetworkFactory<GanglionRaftConfig> for TcpNetworkFactory {
-    type Network = TcpRaftConnection;
-
-    async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
-        TcpRaftConnection {
-            target,
-            addr: node.addr.clone(),
-            format: self.format,
-            stream: None,
-        }
-    }
-}
-
-/// Lazy, self-healing connection to one raft peer.
-pub struct TcpRaftConnection {
+/// Lazy, self-healing connection to one raft peer over an injected dialer.
+pub struct DialerRaftConnection<D: RaftDialer> {
     target: NodeId,
     addr: String,
     format: WireFormat,
-    stream: Option<TcpStream>,
+    dialer: Arc<D>,
+    stream: Option<D::Stream>,
 }
 
-impl TcpRaftConnection {
+impl<D: RaftDialer> DialerRaftConnection<D> {
     async fn call(&mut self, request: WireRequest) -> Result<WireResponse, Unreachable> {
         let result = self.try_call(&request).await;
         if result.is_err() {
@@ -349,7 +422,7 @@ impl TcpRaftConnection {
 
     async fn try_call(&mut self, request: &WireRequest) -> io::Result<WireResponse> {
         if self.stream.is_none() {
-            self.stream = Some(TcpStream::connect(&self.addr).await?);
+            self.stream = Some(self.dialer.dial(&self.addr).await?);
         }
         let stream = self.stream.as_mut().expect("stream just ensured");
         write_frame(stream, self.format, request).await?;
@@ -357,7 +430,10 @@ impl TcpRaftConnection {
     }
 }
 
-impl RaftNetwork<GanglionRaftConfig> for TcpRaftConnection {
+/// Production TCP connection type: a peer connection over real TCP.
+pub type TcpRaftConnection = DialerRaftConnection<TokioDialer>;
+
+impl<D: RaftDialer> RaftNetwork<GanglionRaftConfig> for DialerRaftConnection<D> {
     async fn append_entries(
         &mut self,
         rpc: AppendEntriesRequest<GanglionRaftConfig>,
@@ -417,7 +493,7 @@ pub async fn client_write_remote_with_hint(
     let call = async {
         let mut stream = TcpStream::connect(addr).await?;
         write_frame(&mut stream, format, &WireRequest::ClientWrite(command)).await?;
-        read_frame::<WireResponse>(&mut stream).await
+        read_frame::<_, WireResponse>(&mut stream).await
     };
     match call.await {
         Ok(WireResponse::ClientWrite(Ok(response))) => Ok(response),
