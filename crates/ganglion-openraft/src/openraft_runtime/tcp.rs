@@ -307,7 +307,7 @@ pub async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 /// Establishes a transport stream to a raft peer at its membership address
-/// (`BasicNode.addr`). Production uses [`TokioDialer`] (real TCP); tests can
+/// (`BasicNode.addr`). Production uses [`TokioDialer`] (real TCP). Tests can
 /// inject a simulated transport (for example turmoil) without ganglion taking
 /// any test-framework dependency. The same `serve_connection` accepts the peer
 /// side, so one transport choice covers both directions.
