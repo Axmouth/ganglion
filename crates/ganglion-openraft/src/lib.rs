@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::RwLock;
 
 use ganglion_core::{
-    CoordinationSnapshot, PartitionPlacementPolicy, PlacementError, PlacementInput as PlannerInput,
+    PartitionPlacementPolicy, PlacementError, PlacementInput as PlannerInput,
 };
 use ganglion_storage::{
     FileMetadataLog, FileMetadataReplayPolicy, InMemoryMetadataLog, MetadataLog, MetadataLogEntry,
@@ -764,6 +764,11 @@ impl InMemoryMetadataNodeBuilder {
 
 /// Simple planner export for convenience.
 pub use ganglion_core::DeterministicPartitionPlacement;
+
+/// The committed coordination state appears in the public `Coordination` trait
+/// and in `write_snapshot`, so re-export it as part of the stable surface rather
+/// than making callers reach into `ganglion_core`.
+pub use ganglion_core::CoordinationSnapshot;
 
 #[cfg(feature = "openraft")]
 pub use openraft_runtime::*;
