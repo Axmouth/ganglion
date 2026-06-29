@@ -1043,18 +1043,41 @@ mod tests {
                 .add_learner(4, BasicNode::new("node-4"), true)
                 .await
                 .expect("learner should be added and caught up");
+            // `add_learner` returns once the log is replicated, but the joiner
+            // applies it to its state machine and publishes the watch a moment
+            // later. Wait for that convergence instead of reading immediately.
+            let mut joined = joiner.watch_committed();
+            tokio::time::timeout(timeout, async {
+                while joined.borrow_and_update().generation < 1 {
+                    joined.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("learner observes the pre-join write");
             assert_eq!(joiner.committed_snapshot().generation, 1);
 
-            // Followers cannot drive membership changes.
+            // Followers cannot drive membership changes. Re-resolve the leader
+            // at call time: the initial `leader_id` can go stale if leadership
+            // moves while the cluster settles, which would otherwise pick the
+            // current leader as our "follower" and make the rejection flaky.
+            let current_leader = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("stable leader before follower-rejection check");
             let follower = nodes
                 .iter()
-                .find(|node| node.node_id() != leader_id)
+                .find(|node| node.node_id() != current_leader)
                 .expect("a follower");
             let err = follower
                 .add_learner(5, BasicNode::new("node-5"), false)
                 .await
                 .expect_err("follower add_learner must be refused");
-            assert!(matches!(err, OpenraftAdapterError::NotLeader));
+            assert!(
+                matches!(err, OpenraftAdapterError::NotLeader),
+                "follower {} (leader seen as {current_leader}, follower.is_leader={}) got {err:?}",
+                follower.node_id(),
+                follower.is_leader().await,
+            );
 
             // Promote the learner into the voter set (keep all four voters).
             leader
