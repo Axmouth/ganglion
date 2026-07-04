@@ -130,21 +130,56 @@ impl RaftMetadataNode {
         dir: impl AsRef<std::path::Path>,
         wire_format: super::WireFormat,
     ) -> Result<(Self, super::TcpRaftServer), OpenraftAdapterError> {
+        Self::start_durable_tcp_with_transport(
+            id,
+            config,
+            listen_addr,
+            dir,
+            wire_format,
+            super::TokioDialer,
+            super::PlainAcceptor,
+        )
+        .await
+    }
+
+    /// `start_durable_tcp_with_format` with an injected transport: peers are
+    /// dialed through `dialer` and accepted connections are wrapped by
+    /// `acceptor` before serving. This is how a caller runs the whole raft
+    /// channel over TLS - both seams from its own material, ganglion staying
+    /// TLS-free.
+    pub async fn start_durable_tcp_with_transport<D, A>(
+        id: NodeId,
+        config: Arc<Config>,
+        listen_addr: impl tokio::net::ToSocketAddrs,
+        dir: impl AsRef<std::path::Path>,
+        wire_format: super::WireFormat,
+        dialer: D,
+        acceptor: A,
+    ) -> Result<(Self, super::TcpRaftServer), OpenraftAdapterError>
+    where
+        D: super::RaftDialer,
+        A: super::RaftAcceptor,
+    {
         let (log_store, state_machine) = open_durable_storage(dir)?;
         let log_telemetry = log_store.telemetry_handle();
         let mut node = Self::start_with_network(
             id,
             config,
-            super::TcpNetworkFactory::with_format(wire_format),
+            super::DialerNetworkFactory::with_dialer_format(dialer, wire_format),
             log_store,
             state_machine,
         )
         .await?;
         node.log_telemetry = Some(log_telemetry);
 
-        let server = super::TcpRaftServer::bind(listen_addr, node.raft.clone(), wire_format)
-            .await
-            .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let server = super::TcpRaftServer::bind_with_acceptor(
+            listen_addr,
+            node.raft.clone(),
+            wire_format,
+            acceptor,
+        )
+        .await
+        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
         Ok((node, server))
     }
 }

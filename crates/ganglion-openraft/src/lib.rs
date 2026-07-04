@@ -1,9 +1,7 @@
 use std::fmt;
 use std::sync::RwLock;
 
-use ganglion_core::{
-    PartitionPlacementPolicy, PlacementError, PlacementInput as PlannerInput,
-};
+use ganglion_core::{PartitionPlacementPolicy, PlacementError, PlacementInput as PlannerInput};
 use ganglion_storage::{
     FileMetadataLog, FileMetadataReplayPolicy, InMemoryMetadataLog, MetadataLog, MetadataLogEntry,
     MetadataLogError,

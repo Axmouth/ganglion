@@ -223,8 +223,21 @@ impl TcpRaftServer {
         raft: Raft<GanglionRaftConfig>,
         format: WireFormat,
     ) -> io::Result<Self> {
+        Self::bind_with_acceptor(listen_addr, raft, format, PlainAcceptor).await
+    }
+
+    /// [`bind`](Self::bind) with an injected [`RaftAcceptor`] wrapping each
+    /// accepted connection before it is served (for example a TLS server
+    /// handshake).
+    pub async fn bind_with_acceptor<A: RaftAcceptor>(
+        listen_addr: impl tokio::net::ToSocketAddrs,
+        raft: Raft<GanglionRaftConfig>,
+        format: WireFormat,
+        acceptor: A,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(listen_addr).await?;
         let local_addr = listener.local_addr()?;
+        let acceptor = Arc::new(acceptor);
 
         let handle = tokio::spawn(async move {
             loop {
@@ -232,8 +245,14 @@ impl TcpRaftServer {
                     break;
                 };
                 let raft = raft.clone();
+                let acceptor = acceptor.clone();
                 tokio::spawn(async move {
-                    let _ = serve_connection(stream, raft, format).await;
+                    // A failed wrap (for example a plaintext peer hitting a
+                    // TLS acceptor) drops the connection here; the dialing
+                    // side surfaces the named error. Acceptor impls may log.
+                    if let Ok(stream) = acceptor.accept(stream).await {
+                        let _ = serve_connection(stream, raft, format).await;
+                    }
                 });
             }
         });
@@ -323,6 +342,37 @@ pub trait RaftDialer: Send + Sync + 'static {
         &self,
         addr: &str,
     ) -> impl std::future::Future<Output = io::Result<Self::Stream>> + Send;
+}
+
+/// Wraps an accepted raft connection before it is served - the accept-side
+/// counterpart of [`RaftDialer`]. Production passes the TCP stream through
+/// untouched ([`PlainAcceptor`]); a TLS deployment injects an acceptor that
+/// runs the server-side handshake. Together the two seams let the whole raft
+/// transport run over an encrypted channel without ganglion taking a TLS
+/// dependency.
+pub trait RaftAcceptor: Send + Sync + 'static {
+    /// The byte stream served after wrapping. It needs only tokio's async IO
+    /// traits, like [`RaftDialer::Stream`].
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send;
+
+    /// Wrap `stream`, for example by running a TLS server handshake. An
+    /// error drops the connection without serving it.
+    fn accept(
+        &self,
+        stream: TcpStream,
+    ) -> impl std::future::Future<Output = io::Result<Self::Stream>> + Send;
+}
+
+/// Production acceptor: the plain TCP stream, unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlainAcceptor;
+
+impl RaftAcceptor for PlainAcceptor {
+    type Stream = TcpStream;
+
+    async fn accept(&self, stream: TcpStream) -> io::Result<TcpStream> {
+        Ok(stream)
+    }
 }
 
 /// Production dialer over real TCP.
