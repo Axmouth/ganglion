@@ -440,6 +440,13 @@ impl RaftMetadataNode {
             .await
     }
 
+    /// Inspect one coherent committed state without cloning the whole snapshot.
+    /// The callback holds the state-machine lock and must remain short and must
+    /// not reenter state-machine methods. Returned data cannot borrow the state.
+    pub fn read_committed<R>(&self, read: impl FnOnce(&CoordinationSnapshot) -> R) -> R {
+        self.state_machine.read_committed(read)
+    }
+
     /// Committed coordination snapshot as applied on this node.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.state_machine.committed_snapshot()

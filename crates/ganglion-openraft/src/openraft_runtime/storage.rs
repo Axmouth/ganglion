@@ -274,6 +274,17 @@ impl GanglionStateMachine {
         Ok(())
     }
 
+    /// Inspect one coherent committed state without cloning the whole snapshot.
+    /// The callback holds the state-machine lock and must remain short and must
+    /// not reenter state-machine methods. Returned data cannot borrow the state.
+    pub fn read_committed<R>(&self, read: impl FnOnce(&CoordinationSnapshot) -> R) -> R {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        read(&inner.state)
+    }
+
     /// Current committed coordination snapshot.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.inner
@@ -575,6 +586,50 @@ mod tests {
     #[test]
     fn openraft_storage_contract_suite() -> Result<(), StorageError<NodeId>> {
         Suite::test_all(InMemoryBuilder)
+    }
+
+    #[test]
+    fn committed_read_tracks_applies_and_snapshot_installation() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut source = GanglionStateMachine::default();
+            let mut target = GanglionStateMachine::default();
+            for generation in 1..=3 {
+                let mut state = CoordinationSnapshot {
+                    generation,
+                    ..Default::default()
+                };
+                state
+                    .attributes
+                    .insert("version".into(), generation.to_string());
+                source
+                    .apply([Entry::<GanglionRaftConfig> {
+                        log_id: LogId::new(openraft::CommittedLeaderId::new(1, 1), generation),
+                        payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(state)),
+                    }])
+                    .await
+                    .unwrap();
+                let read = |state: &CoordinationSnapshot| {
+                    (state.generation, state.attributes["version"].clone())
+                };
+                assert_eq!(
+                    source.read_committed(read),
+                    (generation, generation.to_string())
+                );
+                let snapshot = source.build_snapshot().await.unwrap();
+                target
+                    .install_snapshot(&snapshot.meta, snapshot.snapshot)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    target.read_committed(read),
+                    (generation, generation.to_string())
+                );
+                assert_eq!(target.committed_snapshot(), source.committed_snapshot());
+            }
+        });
     }
 
     #[test]
