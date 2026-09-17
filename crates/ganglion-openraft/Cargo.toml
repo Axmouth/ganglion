@@ -2,10 +2,13 @@
 name = "ganglion-openraft"
 version = "0.1.0"
 edition = "2021"
+description = "openraft-backed consensus for the ganglion cluster coordination engine."
+license = "MIT"
+repository = "https://github.com/Axmouth/ganglion"
 
 [dependencies]
-ganglion-core = { path = "../ganglion-core" }
-ganglion-storage = { path = "../ganglion-storage" }
+ganglion-core = { path = "../ganglion-core", version = "0.1.0" }
+ganglion-storage = { path = "../ganglion-storage", version = "0.1.0" }
 openraft = { version = "0.9", optional = true, default-features = false, features = ["serde", "storage-v2"] }
 tokio = { version = "1", optional = true, default-features = false, features = ["rt-multi-thread", "sync", "time", "net", "io-util"] }
 serde = { version = "1", optional = true, features = ["derive"] }
@@ -13,7 +16,7 @@ serde_json = { version = "1", optional = true }
 rmp-serde = { version = "1", optional = true }
 
 [dev-dependencies]
-ganglion-coordination = { path = "../ganglion-coordination" }
+ganglion-coordination = { path = "../ganglion-coordination", version = "0.1.0" }
 proptest = "1"
 
 [features]

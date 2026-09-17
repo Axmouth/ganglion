@@ -2,10 +2,13 @@
 name = "ganglion"
 version = "0.1.0"
 edition = "2021"
+description = "Reusable, domain-free cluster coordination engine (raft-backed)."
+license = "MIT"
+repository = "https://github.com/Axmouth/ganglion"
 
 # Umbrella crate: the stable Ganglion surface that depending crates bind to,
 # so they import `ganglion` instead of reaching into backend crates like
 # `ganglion-openraft` directly.
 
 [dependencies]
-ganglion-openraft = { path = "../ganglion-openraft", features = ["openraft"] }
+ganglion-openraft = { path = "../ganglion-openraft", version = "0.1.0", features = ["openraft"] }

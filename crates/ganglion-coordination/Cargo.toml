@@ -2,7 +2,10 @@
 name = "ganglion-coordination"
 version = "0.1.0"
 edition = "2021"
+description = "Coordination primitives for the ganglion cluster coordination engine."
+license = "MIT"
+repository = "https://github.com/Axmouth/ganglion"
 
 [dependencies]
-ganglion-core = { path = "../ganglion-core" }
+ganglion-core = { path = "../ganglion-core", version = "0.1.0" }
 tokio = { version = "1", features = ["sync", "rt"] }
