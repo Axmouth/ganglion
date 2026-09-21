@@ -398,6 +398,21 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     snapshot
                 }
+                MetadataRaftCommand::UpdatePartitionGuarded { expected_generation, assignment, attributes } => {
+                    if inner.state.generation != expected_generation {
+                        return Some(MetadataRejection::GenerationMismatch { expected: expected_generation, actual: inner.state.generation });
+                    }
+                    inner.state.assignments.insert(assignment.resource.clone(), assignment);
+                    for (key, value) in attributes {
+                        match value {
+                            Some(value) => { inner.state.attributes.insert(key, value); }
+                            None => { inner.state.attributes.remove(&key); }
+                        }
+                    }
+                    inner.state.generation += 1;
+                    state_changed = true;
+                    return None;
+                }
                 // Merge commands: cannot clobber concurrent updates, so no
                 // CAS/staleness checks apply.
                 MetadataRaftCommand::RegisterNode { node } => {
@@ -848,6 +863,40 @@ mod tests {
             assert!(!sm.apply(entry(guard(1, Some("prepared")))).await.unwrap()[0].accepted);
             assert!(!sm.apply(entry(guard(2, None))).await.unwrap()[0].accepted);
             assert_eq!(sm.committed_snapshot(), current);
+        });
+    }
+
+    #[test]
+    fn guarded_partition_activation_is_atomic_and_preserves_advisory_updates() {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+            let mut sm = GanglionStateMachine::default();
+            let mut index = 0;
+            let mut entry = |command| { index += 1; [Entry::<GanglionRaftConfig> { log_id:LogId::new(openraft::CommittedLeaderId::new(1,0),index),payload:EntryPayload::Normal(command) }] };
+            let resource=ganglion_core::ResourceIdentity::new("queue","q",0,None::<String>);
+            let old=ganglion_core::PartitionAssignment::new(resource.clone(),"a",vec!["b".into()],1);
+            let new=ganglion_core::PartitionAssignment::new(resource.clone(),"b",vec!["a".into()],2);
+            let mut snapshot=CoordinationSnapshot::default(); snapshot.generation=1;
+            snapshot.assignments.insert(resource.clone(),old.clone());
+            snapshot.attributes.insert("pending".into(),"plan".into());
+            snapshot.attributes.insert("unrelated".into(),"preserve".into());
+            let mut node=ganglion_core::NodeInfo::new("a","addr",None::<String>);
+            snapshot.nodes.insert("a".into(),node.clone());
+            sm.apply(entry(MetadataRaftCommand::ApplySnapshot(snapshot))).await.unwrap();
+            node.labels.insert("heartbeat".into(),"fresh".into());
+            sm.apply(entry(MetadataRaftCommand::RegisterNode {node})).await.unwrap();
+            let command=|expected_generation|MetadataRaftCommand::UpdatePartitionGuarded { expected_generation,assignment:new.clone(),attributes:std::collections::BTreeMap::from([("pending".into(),None),("activation".into(),Some("certificate".into()))]) };
+            assert!(!sm.apply(entry(command(0))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot().assignments[&resource],old);
+            assert_eq!(sm.committed_snapshot().attributes["pending"],"plan");
+            assert!(sm.apply(entry(command(1))).await.unwrap()[0].accepted);
+            let after=sm.committed_snapshot();
+            assert_eq!(after.assignments[&resource],new);
+            assert!(!after.attributes.contains_key("pending"));
+            assert_eq!(after.attributes["activation"],"certificate");
+            assert_eq!(after.attributes["unrelated"],"preserve");
+            assert_eq!(after.nodes["a"].labels["heartbeat"],"fresh");
+            assert!(!sm.apply(entry(command(1))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot(),after);
         });
     }
 

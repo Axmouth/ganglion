@@ -46,6 +46,13 @@ pub enum MetadataRaftCommand {
         expected_generation: u64,
         snapshot: CoordinationSnapshot,
     },
+    /// Atomically publish one partition and consumer-owned attributes while
+    /// preserving concurrent advisory node-label updates.
+    UpdatePartitionGuarded {
+        expected_generation: u64,
+        assignment: ganglion_core::PartitionAssignment,
+        attributes: std::collections::BTreeMap<String, Option<String>>,
+    },
     /// Merge (insert or update) one node record. Unlike the snapshot-replace
     /// commands, this cannot clobber concurrent updates, so brokers can
     /// register/heartbeat themselves without CAS loops. Bumps the generation.
