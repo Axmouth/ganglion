@@ -104,6 +104,15 @@ pub enum MetadataRaftCommand {
         expected: Option<String>,
         value: String,
     },
+    /// Remove a catalogue entry while replacing its observed attribute with a
+    /// consumer-owned retirement marker. Assignment removal is still planned
+    /// separately; the marker prevents a retiring assignment losing its fence.
+    DeregisterResourceReplacingAttribute {
+        resource: ganglion_core::ResourceIdentity,
+        key: String,
+        expected: Option<String>,
+        value: String,
+    },
 }
 
 /// Deterministic state-machine rejection reasons.

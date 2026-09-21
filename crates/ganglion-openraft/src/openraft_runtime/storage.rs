@@ -380,6 +380,10 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
         let mut apply_command = |inner: &mut StateMachineInner,
                                  command: MetadataRaftCommand|
          -> Option<MetadataRejection> {
+            let retirement_attribute = match &command {
+                MetadataRaftCommand::DeregisterResourceReplacingAttribute { value, .. } => Some(value.clone()),
+                _ => None,
+            };
             let snapshot = match command {
                 MetadataRaftCommand::ApplySnapshot(snapshot) => snapshot,
                 MetadataRaftCommand::ApplySnapshotGuarded {
@@ -452,13 +456,20 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
-                MetadataRaftCommand::DeregisterResourceWithAttribute { resource, key, expected } => {
+                MetadataRaftCommand::DeregisterResourceWithAttribute { resource, key, expected }
+                | MetadataRaftCommand::DeregisterResourceReplacingAttribute { resource, key, expected, .. } => {
                     let actual = inner.state.attributes.get(&key).cloned();
                     if actual != expected {
                         return Some(MetadataRejection::AttributeMismatch { key, actual });
                     }
                     let removed = inner.state.resources.remove(&resource);
-                    let attribute = inner.state.attributes.remove(&key).is_some();
+                    let attribute = if let Some(value) = retirement_attribute {
+                        let changed = inner.state.attributes.get(&key) != Some(&value);
+                        inner.state.attributes.insert(key, value);
+                        changed
+                    } else {
+                        inner.state.attributes.remove(&key).is_some()
+                    };
                     if removed || attribute {
                         inner.state.generation += 1;
                         state_changed = true;
@@ -759,6 +770,47 @@ mod tests {
                 assert!(state.resources.contains(&resource));
                 assert!(!state.attributes.contains_key("incarnation"));
             }
+        });
+    }
+
+    #[test]
+    fn conditional_retirement_preserves_assignment_and_marker_across_snapshot() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+            let mut sm = GanglionStateMachine::default();
+            let mut initial = CoordinationSnapshot::default();
+            initial.resources.insert(resource.clone());
+            initial.assignments.insert(resource.clone(), ganglion_core::PartitionAssignment::new(
+                resource.clone(), "a", vec![], 1,
+            ));
+            initial.attributes.insert("incarnation".into(), "enrolled".into());
+            let mut index = 0;
+            let mut entry = |command| {
+                index += 1;
+                [Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            sm.apply(entry(MetadataRaftCommand::ApplySnapshot(initial))).await.unwrap();
+            let retire = |expected: &str| MetadataRaftCommand::DeregisterResourceReplacingAttribute {
+                resource: resource.clone(), key: "incarnation".into(),
+                expected: Some(expected.into()), value: "retired".into(),
+            };
+            assert!(sm.apply(entry(retire("enrolled"))).await.unwrap()[0].accepted);
+            let retired = sm.committed_snapshot();
+            assert!(!retired.resources.contains(&resource));
+            assert!(retired.assignments.contains_key(&resource));
+            assert_eq!(retired.attributes["incarnation"], "retired");
+            assert!(sm.apply(entry(retire("retired"))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot(), retired, "retry must not churn generation");
+            assert!(!sm.apply(entry(retire("enrolled"))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot(), retired, "stale retirement must not mutate metadata");
+            let snapshot = sm.build_snapshot().await.unwrap();
+            let mut restored = GanglionStateMachine::default();
+            restored.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+            assert_eq!(restored.committed_snapshot(), retired);
         });
     }
 
