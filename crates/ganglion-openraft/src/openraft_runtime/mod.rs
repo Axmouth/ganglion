@@ -95,6 +95,15 @@ pub enum MetadataRaftCommand {
         expected: Option<String>,
         value: String,
     },
+    /// Merge one attribute only while the inspected coordination generation and
+    /// previous attribute still match. Preserves concurrent advisory heartbeat
+    /// updates, which intentionally do not advance the generation.
+    CompareAndSetAttributeGuarded {
+        expected_generation: u64,
+        key: String,
+        expected: Option<String>,
+        value: String,
+    },
 }
 
 /// Deterministic state-machine rejection reasons.

@@ -480,6 +480,25 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
+                MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                    expected_generation, key, expected, value,
+                } => {
+                    if inner.state.generation != expected_generation {
+                        return Some(MetadataRejection::GenerationMismatch {
+                            expected: expected_generation, actual: inner.state.generation,
+                        });
+                    }
+                    let actual = inner.state.attributes.get(&key).cloned();
+                    if actual != expected {
+                        return Some(MetadataRejection::AttributeMismatch { key, actual });
+                    }
+                    if actual.as_ref() != Some(&value) {
+                        inner.state.attributes.insert(key, value);
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
                 MetadataRaftCommand::CompareAndSetAttribute {
                     key,
                     expected,
@@ -740,6 +759,43 @@ mod tests {
                 assert!(state.resources.contains(&resource));
                 assert!(!state.attributes.contains_key("incarnation"));
             }
+        });
+    }
+
+    #[test]
+    fn guarded_attribute_merge_preserves_heartbeats_and_checks_both_guards() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let mut sm = GanglionStateMachine::default();
+            let mut index = 0;
+            let mut entry = |command| {
+                index += 1;
+                [Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            let mut node = ganglion_core::NodeInfo::new("a", "endpoint", None::<String>);
+            node.labels.insert("heartbeat".into(), "old".into());
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node: node.clone() })).await.unwrap();
+            assert_eq!(sm.committed_snapshot().generation, 1);
+            node.labels.insert("heartbeat".into(), "fresh".into());
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node })).await.unwrap();
+            assert_eq!(sm.committed_snapshot().generation, 1);
+            let guard = |generation, expected: Option<&str>| MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                expected_generation: generation, key: "history".into(),
+                expected: expected.map(str::to_owned), value: "prepared".into(),
+            };
+            let replies = sm.apply(entry(guard(1, None))).await.unwrap();
+            assert!(replies[0].accepted);
+            let current = sm.committed_snapshot();
+            assert_eq!(current.nodes["a"].labels["heartbeat"], "fresh");
+            assert_eq!(current.generation, 2);
+            assert!(sm.apply(entry(guard(2, Some("prepared")))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot(), current, "same-value consensus check must not churn generation");
+            assert!(!sm.apply(entry(guard(1, Some("prepared")))).await.unwrap()[0].accepted);
+            assert!(!sm.apply(entry(guard(2, None))).await.unwrap()[0].accepted);
+            assert_eq!(sm.committed_snapshot(), current);
         });
     }
 
