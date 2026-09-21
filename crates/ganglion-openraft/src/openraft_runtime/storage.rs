@@ -434,8 +434,32 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
+                MetadataRaftCommand::RegisterResourceWithInitialAttribute { resource, key, value } => {
+                    if !inner.state.resources.contains(&resource) {
+                        if !inner.state.assignments.contains_key(&resource) {
+                            inner.state.attributes.insert(key, value);
+                        }
+                        inner.state.resources.insert(resource);
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
                 MetadataRaftCommand::DeregisterResource { resource } => {
                     if inner.state.resources.remove(&resource) {
+                        inner.state.generation += 1;
+                        state_changed = true;
+                    }
+                    return None;
+                }
+                MetadataRaftCommand::DeregisterResourceWithAttribute { resource, key, expected } => {
+                    let actual = inner.state.attributes.get(&key).cloned();
+                    if actual != expected {
+                        return Some(MetadataRejection::AttributeMismatch { key, actual });
+                    }
+                    let removed = inner.state.resources.remove(&resource);
+                    let attribute = inner.state.attributes.remove(&key).is_some();
+                    if removed || attribute {
                         inner.state.generation += 1;
                         state_changed = true;
                     }
@@ -628,6 +652,93 @@ mod tests {
                     (generation, generation.to_string())
                 );
                 assert_eq!(target.committed_snapshot(), source.committed_snapshot());
+            }
+        });
+    }
+
+    #[test]
+    fn resource_initial_attribute_is_atomic_and_survives_snapshot_installation() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "ganglion-incarnation-{}-{}.json", std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            ));
+            let mut sm = GanglionStateMachine::persistent(&path).unwrap();
+            let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+            let mut index = 0;
+            let mut entry = |command| {
+                index += 1;
+                [Entry::<GanglionRaftConfig> {
+                    log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                    payload: EntryPayload::Normal(command),
+                }]
+            };
+            let register = |value: &str| MetadataRaftCommand::RegisterResourceWithInitialAttribute {
+                resource: resource.clone(), key: "incarnation".into(), value: value.into(),
+            };
+            // Independently proposed registrations serialize to one origin.
+            for value in ["first", "second", "first"] {
+                let replies = sm.apply(entry(register(value))).await.unwrap();
+                assert!(replies[0].accepted);
+                let state = sm.committed_snapshot();
+                assert!(state.resources.contains(&resource));
+                assert_eq!(state.attributes["incarnation"], "first");
+                assert_eq!(state.generation, 1);
+            }
+            let snapshot = sm.build_snapshot().await.unwrap();
+            let reopened = GanglionStateMachine::persistent(&path).unwrap();
+            assert_eq!(reopened.committed_snapshot(), sm.committed_snapshot());
+            let mut target = GanglionStateMachine::default();
+            target.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+            assert_eq!(target.committed_snapshot(), sm.committed_snapshot());
+
+            let delete = |expected: &str| MetadataRaftCommand::DeregisterResourceWithAttribute {
+                resource: resource.clone(), key: "incarnation".into(), expected: Some(expected.into()),
+            };
+            sm.apply(entry(delete("first"))).await.unwrap();
+            let state = sm.committed_snapshot();
+            assert!(!state.resources.contains(&resource));
+            assert!(!state.attributes.contains_key("incarnation"));
+            sm.apply(entry(register("replacement"))).await.unwrap();
+            let before = sm.committed_snapshot();
+            let replies = sm.apply(entry(delete("first"))).await.unwrap();
+            assert!(!replies[0].accepted, "delayed deletion must not erase a replacement");
+            assert_eq!(sm.committed_snapshot(), before);
+            assert_eq!(before.attributes["incarnation"], "replacement");
+            std::fs::remove_file(path).unwrap();
+        });
+    }
+
+    #[test]
+    fn resource_initial_attribute_never_labels_existing_or_retiring_resources() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(async {
+            for retiring in [false, true] {
+                let mut sm = GanglionStateMachine::default();
+                let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+                let mut state = CoordinationSnapshot::default();
+                if retiring {
+                    state.assignments.insert(resource.clone(), ganglion_core::PartitionAssignment::new(
+                        resource.clone(), "a", vec![], 1,
+                    ));
+                } else {
+                    state.resources.insert(resource.clone());
+                }
+                for (index, command) in [
+                    MetadataRaftCommand::ApplySnapshot(state),
+                    MetadataRaftCommand::RegisterResourceWithInitialAttribute {
+                        resource: resource.clone(), key: "incarnation".into(), value: "invented".into(),
+                    },
+                ].into_iter().enumerate() {
+                    sm.apply([Entry::<GanglionRaftConfig> {
+                        log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index as u64 + 1),
+                        payload: EntryPayload::Normal(command),
+                    }]).await.unwrap();
+                }
+                let state = sm.committed_snapshot();
+                assert!(state.resources.contains(&resource));
+                assert!(!state.attributes.contains_key("incarnation"));
             }
         });
     }

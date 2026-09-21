@@ -57,11 +57,28 @@ pub enum MetadataRaftCommand {
     RegisterResource {
         resource: ganglion_core::ResourceIdentity,
     },
+    /// Register a resource and seed a consumer-owned attribute in one commit.
+    /// The attribute is written only for a resource absent from BOTH catalogue
+    /// and assignments. Concurrent/retried registration retains the first value;
+    /// existing or retiring resources are never retroactively labelled as new.
+    RegisterResourceWithInitialAttribute {
+        resource: ganglion_core::ResourceIdentity,
+        key: String,
+        value: String,
+    },
     /// Remove one resource from the catalogue. Bumps the generation when it
     /// was present. Does NOT touch any existing assignment for it — retiring
     /// placements is the controller's job.
     DeregisterResource {
         resource: ganglion_core::ResourceIdentity,
+    },
+    /// Remove a catalogue entry and its consumer-owned attribute atomically,
+    /// conditional on the observed attribute. A delayed delete cannot remove a
+    /// replacement incarnation whose attribute changed in the meantime.
+    DeregisterResourceWithAttribute {
+        resource: ganglion_core::ResourceIdentity,
+        key: String,
+        expected: Option<String>,
     },
     /// Set (insert or replace) one cluster attribute (idempotent merge; a
     /// same-value write does not bump the generation). Consumers own their
