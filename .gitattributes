@@ -1,0 +1,3 @@
+# Keep the upstream archive's formatting intact; local deltas are documented
+# in vendor/openraft/PATCHES.md.
+vendor/openraft/** -whitespace linguist-vendored

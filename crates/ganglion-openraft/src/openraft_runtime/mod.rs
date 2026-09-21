@@ -1,4 +1,4 @@
-//! Feature-gated openraft (0.8.x) runtime integration.
+//! Feature-gated OpenRaft (0.9.x) runtime integration.
 //!
 //! Declares the [`openraft::RaftTypeConfig`] surface, the application
 //! command/response payloads, and the storage adapters used by the
@@ -17,6 +17,8 @@ mod network;
 mod node;
 mod storage;
 mod tcp;
+#[cfg(test)]
+mod replication_regression;
 
 /// Re-export of the underlying raft crate so consumers can name trait bounds
 /// (`openraft::storage::RaftLogStorage`), `BasicNode`, `Config`, etc. without

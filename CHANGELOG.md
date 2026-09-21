@@ -22,5 +22,13 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Fixed
 
+- Replication no longer panics on an empty log read. A pinned OpenRaft 0.9.25
+  source copy retries the original request without acknowledging unread entries,
+  correcting both the 0.9.24 unwrap and the 0.9.25 index-zero heartbeat fallback.
+  A subprocess regression catches background panics, verifies catch-up after
+  transient empty reads, and verifies old streams stop on step-down during
+  persistent retries. See
+  `vendor/openraft/PATCHES.md` for provenance and upstream replacement conditions.
+
 - Poisoned locks in the openraft adapters are recovered instead of panicking,
   so one panicked holder cannot wedge the coordination layer.
