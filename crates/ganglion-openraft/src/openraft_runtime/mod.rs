@@ -15,8 +15,10 @@ use crate::OpenraftAdapterError;
 mod durable;
 mod network;
 mod node;
+mod peer_health;
 mod storage;
 mod tcp;
+pub use peer_health::PeerTransportFailure;
 #[cfg(test)]
 mod replication_regression;
 

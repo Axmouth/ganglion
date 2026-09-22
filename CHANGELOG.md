@@ -11,6 +11,11 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Added
 
+- Local peer transport observations for TCP Raft nodes. Consumers can subscribe
+  to bounded explicit connection-failure episodes; successful RPCs clear the
+  peer's episode. These observations grant no consensus or application authority
+  and leave Raft elections and retry behavior unchanged.
+
 - An injectable raft transport (`RaftDialer`), so consensus runs over real
   TCP or a simulated network without test-only dependencies in consumers.
 - The accept-side counterpart (`RaftAcceptor`): `TcpRaftServer` can wrap each

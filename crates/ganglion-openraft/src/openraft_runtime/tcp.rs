@@ -393,6 +393,7 @@ impl RaftDialer for TokioDialer {
 pub struct DialerNetworkFactory<D> {
     format: WireFormat,
     dialer: Arc<D>,
+    pub(crate) health: super::peer_health::PeerHealth,
 }
 
 impl<D: Default> Default for DialerNetworkFactory<D> {
@@ -400,6 +401,7 @@ impl<D: Default> Default for DialerNetworkFactory<D> {
         Self {
             format: WireFormat::default(),
             dialer: Arc::new(D::default()),
+            health: Default::default(),
         }
     }
 }
@@ -417,6 +419,7 @@ impl<D: RaftDialer> DialerNetworkFactory<D> {
         Self {
             format,
             dialer: Arc::new(dialer),
+            health: Default::default(),
         }
     }
 }
@@ -431,6 +434,7 @@ impl<D: RaftDialer> RaftNetworkFactory<GanglionRaftConfig> for DialerNetworkFact
             format: self.format,
             dialer: self.dialer.clone(),
             stream: None,
+            health: self.health.clone(),
         }
     }
 }
@@ -458,11 +462,13 @@ pub struct DialerRaftConnection<D: RaftDialer> {
     format: WireFormat,
     dialer: Arc<D>,
     stream: Option<D::Stream>,
+    health: super::peer_health::PeerHealth,
 }
 
 impl<D: RaftDialer> DialerRaftConnection<D> {
     async fn call(&mut self, request: WireRequest) -> Result<WireResponse, Unreachable> {
         let result = self.try_call(&request).await;
+        self.health.observe(self.target, &result);
         if result.is_err() {
             // Drop the broken connection; the next call reconnects.
             self.stream = None;

@@ -62,6 +62,7 @@ pub struct RaftMetadataNode {
     raft: Raft<GanglionRaftConfig>,
     state_machine: GanglionStateMachine,
     log_telemetry: Option<Arc<super::StorageTelemetry>>,
+    peer_health: super::peer_health::PeerHealth,
 }
 
 impl RaftMetadataNode {
@@ -162,15 +163,18 @@ impl RaftMetadataNode {
     {
         let (log_store, state_machine) = open_durable_storage(dir)?;
         let log_telemetry = log_store.telemetry_handle();
+        let network = super::DialerNetworkFactory::with_dialer_format(dialer, wire_format);
+        let peer_health = network.health.clone();
         let mut node = Self::start_with_network(
             id,
             config,
-            super::DialerNetworkFactory::with_dialer_format(dialer, wire_format),
+            network,
             log_store,
             state_machine,
         )
         .await?;
         node.log_telemetry = Some(log_telemetry);
+        node.peer_health = peer_health;
 
         let server = super::TcpRaftServer::bind_with_acceptor(
             listen_addr,
@@ -255,6 +259,7 @@ impl RaftMetadataNode {
             raft,
             state_machine,
             log_telemetry: None,
+            peer_health: Default::default(),
         })
     }
 
@@ -463,6 +468,14 @@ impl RaftMetadataNode {
 
     pub fn node_id(&self) -> NodeId {
         self.id
+    }
+
+    /// Explicit local transport failures. A successful RPC clears its peer's
+    /// observation; in-process transports expose an empty view.
+    pub fn peer_transport_failures(&self) -> tokio::sync::watch::Receiver<
+        std::collections::BTreeMap<u64, super::PeerTransportFailure>,
+    > {
+        self.peer_health.subscribe()
     }
 
     pub async fn current_leader(&self) -> Option<NodeId> {
