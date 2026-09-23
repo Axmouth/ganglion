@@ -477,12 +477,37 @@ impl<D: RaftDialer> DialerRaftConnection<D> {
     }
 
     async fn try_call(&mut self, request: &WireRequest) -> io::Result<WireResponse> {
-        if self.stream.is_none() {
-            self.stream = Some(self.dialer.dial(&self.addr).await?);
+        // The in-flight call owns the stream. A timeout/cancellation drops it,
+        // so a late reply can never become the next request's response.
+        let mut stream = match self.stream.take() {
+            Some(stream) => stream,
+            None => self.dialer.dial(&self.addr).await?,
+        };
+        write_frame(&mut stream, self.format, request).await?;
+        let response: WireResponse = read_frame(&mut stream).await?;
+        // A stopped/replaced Raft core can still answer on its old accepted
+        // socket. Redial the peer address instead of retrying that dead core.
+        let fatal = matches!(
+            &response,
+            WireResponse::AppendEntries(Err(RaftError::Fatal(_)))
+                | WireResponse::Vote(Err(RaftError::Fatal(_)))
+                | WireResponse::InstallSnapshot(Err(RaftError::Fatal(_)))
+        );
+        let matching = matches!(
+            (request, &response),
+            (
+                WireRequest::AppendEntries(_),
+                WireResponse::AppendEntries(_)
+            ) | (WireRequest::Vote(_), WireResponse::Vote(_))
+                | (
+                    WireRequest::InstallSnapshot(_),
+                    WireResponse::InstallSnapshot(_)
+                )
+        );
+        if !fatal && matching {
+            self.stream = Some(stream);
         }
-        let stream = self.stream.as_mut().expect("stream just ensured");
-        write_frame(stream, self.format, request).await?;
-        read_frame(stream).await
+        Ok(response)
     }
 }
 
@@ -621,6 +646,93 @@ mod tests {
             "yaml".parse::<WireFormat>(),
             Err(WireFormatParseError::Unknown { raw: "yaml".into() })
         );
+    }
+
+    async fn assert_redial_after_interrupted_peer(cancel: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (received, observed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut old, _) = listener.accept().await.unwrap();
+            let _: WireRequest = read_frame(&mut old).await.unwrap();
+            if !cancel {
+                write_frame(
+                    &mut old,
+                    WireFormat::MessagePack,
+                    &WireResponse::Vote(Err(RaftError::Fatal(openraft::error::Fatal::Stopped))),
+                )
+                .await
+                .unwrap();
+            }
+            received.send(()).unwrap();
+            // Keep the old socket open: only a client redial can reach the
+            // replacement service, just as with an embedded Raft restart.
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            let WireRequest::Vote(request) = read_frame(&mut fresh).await.unwrap() else {
+                panic!("vote required")
+            };
+            write_frame(
+                &mut fresh,
+                WireFormat::MessagePack,
+                &WireResponse::Vote(Ok(VoteResponse {
+                    vote: request.vote,
+                    vote_granted: true,
+                    last_log_id: None,
+                })),
+            )
+            .await
+            .unwrap();
+            drop(old);
+        });
+        let mut conn = DialerRaftConnection {
+            target: 2,
+            addr: addr.to_string(),
+            format: WireFormat::MessagePack,
+            dialer: Arc::new(TokioDialer),
+            stream: None,
+            health: Default::default(),
+        };
+        let request = || {
+            WireRequest::Vote(VoteRequest {
+                vote: openraft::Vote::new(1, 1),
+                last_log_id: None,
+            })
+        };
+        if cancel {
+            let mut call = Box::pin(conn.call(request()));
+            tokio::select! {
+                _ = &mut call => panic!("call unexpectedly completed"),
+                _ = observed => {}
+            }
+            drop(call);
+        } else {
+            assert!(matches!(
+                conn.call(request()).await.unwrap(),
+                WireResponse::Vote(Err(RaftError::Fatal(_)))
+            ));
+            observed.await.unwrap();
+        }
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(3), conn.call(request()))
+                .await
+                .unwrap()
+                .unwrap(),
+            WireResponse::Vote(Ok(VoteResponse {
+                vote_granted: true,
+                ..
+            }))
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_peer_redials_instead_of_reusing_old_socket() {
+        assert_redial_after_interrupted_peer(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_redials_instead_of_reading_a_late_reply() {
+        assert_redial_after_interrupted_peer(true).await;
     }
 
     #[tokio::test]

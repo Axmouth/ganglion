@@ -27,6 +27,12 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Fixed
 
+- Persistent Raft connections now redial after a remote fatal response, so a
+  stopped embedded core cannot trap a peer on its old socket after restart.
+  Cancelled or failed requests also discard their socket, preventing a late reply
+  from being read as the next request's response. Deterministic transport tests
+  cover both cases.
+
 - Replication no longer panics on an empty log read. A pinned OpenRaft 0.9.25
   source copy retries the original request without acknowledging unread entries,
   correcting both the 0.9.24 unwrap and the 0.9.25 index-zero heartbeat fallback.
