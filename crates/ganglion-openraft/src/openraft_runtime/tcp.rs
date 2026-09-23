@@ -244,6 +244,11 @@ impl TcpRaftServer {
                 let Ok((stream, _peer)) = listener.accept().await else {
                     break;
                 };
+                // Small Raft/control frames must not wait for a delayed ACK.
+                // Configure the TCP layer before an optional TLS wrapper.
+                if stream.set_nodelay(true).is_err() {
+                    continue;
+                }
                 let raft = raft.clone();
                 let acceptor = acceptor.clone();
                 tokio::spawn(async move {
@@ -383,7 +388,9 @@ impl RaftDialer for TokioDialer {
     type Stream = TcpStream;
 
     async fn dial(&self, addr: &str) -> io::Result<Self::Stream> {
-        TcpStream::connect(addr).await
+        let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
     }
 }
 
@@ -572,7 +579,7 @@ pub async fn client_write_remote_with_hint(
     format: WireFormat,
 ) -> Result<MetadataRaftResponse, RemoteWriteError> {
     let call = async {
-        let mut stream = TcpStream::connect(addr).await?;
+        let mut stream = TokioDialer.dial(addr).await?;
         write_frame(&mut stream, format, &WireRequest::ClientWrite(command)).await?;
         read_frame::<_, WireResponse>(&mut stream).await
     };

@@ -25,6 +25,13 @@ tagged releases yet. Earlier history predates this changelog.
   stays TLS-free.
 - `CoordinationSnapshot` re-exported as part of the stable surface.
 
+### Changed
+
+- Real TCP Raft sockets and forwarded metadata writes enable `TCP_NODELAY`,
+  including accepted sockets before optional TLS wrapping. Small control frames
+  can be sent promptly without waiting for Nagle buffering; consensus and
+  durability requirements are unchanged.
+
 ### Fixed
 
 - Persistent Raft connections now redial after a remote fatal response, so a
