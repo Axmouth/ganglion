@@ -478,6 +478,12 @@ impl RaftMetadataNode {
         self.peer_health.subscribe()
     }
 
+    /// Observe idle transport closure promptly for an application's immediate
+    /// failure-detection policy. Default off; observations grant no authority.
+    pub fn set_monitor_idle_peer_connections(&self, enabled: bool) {
+        self.peer_health.set_monitor_idle(enabled);
+    }
+
     pub async fn current_leader(&self) -> Option<NodeId> {
         self.raft.current_leader().await
     }

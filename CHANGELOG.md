@@ -11,10 +11,15 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Added
 
+- Optional idle Raft connection monitoring through `set_monitor_idle_peer_connections`.
+  The observer owns the idle stream, returns it before the next RPC, and stops on
+  connection cancellation/drop. Explicit closure triggers one bounded reconnect
+  probe; timeouts are not explicit peer-loss evidence.
+
 - Local peer transport observations for TCP Raft nodes. Consumers can subscribe
   to bounded explicit connection-failure episodes; successful RPCs clear the
   peer's episode. These observations grant no consensus or application authority
-  and leave Raft elections and retry behavior unchanged.
+  and leave Raft election rules unchanged.
 
 - An injectable raft transport (`RaftDialer`), so consensus runs over real
   TCP or a simulated network without test-only dependencies in consumers.
@@ -26,6 +31,10 @@ tagged releases yet. Earlier history predates this changelog.
 - `CoordinationSnapshot` re-exported as part of the stable surface.
 
 ### Changed
+
+- Explicit Raft RPC disconnects are verified by one immediate retry with a 200 ms
+  deadline. A successful exchange clears suspicion; failed/cancelled exchanges
+  discard their socket so late replies cannot leak into another request.
 
 - Real TCP Raft sockets and forwarded metadata writes enable `TCP_NODELAY`,
   including accepted sockets before optional TLS wrapping. Small control frames

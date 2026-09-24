@@ -340,7 +340,7 @@ pub trait RaftDialer: Send + Sync + 'static {
     /// traits, which simulated transports implement too. `Send + Sync` mirror
     /// openraft's `RaftNetwork` bounds (real and simulated TCP both satisfy
     /// them).
-    type Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync;
+    type Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static;
 
     /// Connect to `addr`, returning a fresh stream.
     fn dial(
@@ -441,6 +441,7 @@ impl<D: RaftDialer> RaftNetworkFactory<GanglionRaftConfig> for DialerNetworkFact
             format: self.format,
             dialer: self.dialer.clone(),
             stream: None,
+            idle: None,
             health: self.health.clone(),
         }
     }
@@ -469,21 +470,129 @@ pub struct DialerRaftConnection<D: RaftDialer> {
     format: WireFormat,
     dialer: Arc<D>,
     stream: Option<D::Stream>,
+    idle: Option<IdleStream<D::Stream>>,
     health: super::peer_health::PeerHealth,
+}
+
+/// Own the socket while no RPC is using it. Only this task reads; the next RPC
+/// first retrieves ownership. Dropping/cancelling the connection aborts the task.
+struct IdleStream<S> {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<Option<S>>>,
+}
+impl<S> Drop for IdleStream<S> {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+impl<S> IdleStream<S> {
+    async fn acquire(mut self) -> Option<S> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        let result = self.task.as_mut()?.await.ok().flatten();
+        self.task.take();
+        result
+    }
 }
 
 impl<D: RaftDialer> DialerRaftConnection<D> {
     async fn call(&mut self, request: WireRequest) -> Result<WireResponse, Unreachable> {
-        let result = self.try_call(&request).await;
+        let mut result = self.try_call(&request).await;
         self.health.observe(self.target, &result);
+        if result
+            .as_ref()
+            .is_err_and(|e| super::peer_health::PeerHealth::explicit_failure(e.kind()))
+        {
+            // Raft requests tolerate retries. Verify an explicit disconnect once
+            // immediately instead of waiting for OpenRaft's unreachable backoff.
+            // The in-flight call owns the stream, so cancellation drops it and a
+            // late response cannot be consumed by another request. A silent peer
+            // gets a bounded probe and supplies no second explicit-failure vote.
+            result = match tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                self.try_call(&request),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "disconnect verification timed out",
+                )),
+            };
+            self.health.observe(self.target, &result);
+        }
         if result.is_err() {
             // Drop the broken connection; the next call reconnects.
             self.stream = None;
         }
+        if result.is_ok() {
+            self.park_idle_stream();
+        }
         result.map_err(|error| Unreachable::new(&error))
     }
 
+    fn park_idle_stream(&mut self) {
+        if !self.health.monitor_idle() {
+            return;
+        }
+        let Some(mut stream) = self.stream.take() else {
+            return;
+        };
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let health = self.health.clone();
+        let dialer = self.dialer.clone();
+        let addr = self.addr.clone();
+        let target = self.target;
+        let task = tokio::spawn(async move {
+            let mut byte = [0u8];
+            // AsyncReadExt::read is cancellation-safe. A peer cannot send
+            // an unsolicited response on this request/response transport.
+            let result = tokio::select! {
+                biased;
+                _ = &mut stopped => return Some(stream),
+                result = stream.read(&mut byte) => result,
+            };
+            drop(stream);
+            let error = match result {
+                Ok(0) => io::Error::new(io::ErrorKind::UnexpectedEof, "idle peer closed"),
+                Err(error) => error,
+                Ok(_) => return None, // unexpected bytes: discard, no liveness inference
+            };
+            if !super::peer_health::PeerHealth::explicit_failure(error.kind()) {
+                return None;
+            }
+            health.observe::<()>(target, &Err(error));
+            // A successful dial is retained for the next real RPC; it
+            // does not itself establish Raft health. A timeout supplies
+            // no explicit-failure evidence. Stop cancels the owned probe.
+            let probe = tokio::select! {
+                biased;
+                _ = &mut stopped => return None,
+                probe = tokio::time::timeout(std::time::Duration::from_millis(200), dialer.dial(&addr)) => probe,
+            };
+            match probe {
+                Ok(Ok(stream)) => Some(stream),
+                Ok(Err(error)) => {
+                    health.observe::<()>(target, &Err(error));
+                    None
+                }
+                Err(_) => None,
+            }
+        });
+        self.idle = Some(IdleStream {
+            stop: Some(stop),
+            task: Some(task),
+        });
+    }
+
     async fn try_call(&mut self, request: &WireRequest) -> io::Result<WireResponse> {
+        if let Some(idle) = self.idle.take() {
+            self.stream = idle.acquire().await;
+        }
         // The in-flight call owns the stream. A timeout/cancellation drops it,
         // so a late reply can never become the next request's response.
         let mut stream = match self.stream.take() {
@@ -639,6 +748,218 @@ mod tests {
         std::env::temp_dir().join(format!("ganglion-tcp-{tag}-{}-{nanos}", std::process::id()))
     }
 
+    #[tokio::test]
+    async fn explicit_refusal_is_verified_without_waiting_for_another_raft_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let health = super::super::peer_health::PeerHealth::default();
+        let observed = health.subscribe();
+        let mut conn = DialerRaftConnection {
+            target: 2,
+            addr: addr.to_string(),
+            format: WireFormat::MessagePack,
+            dialer: Arc::new(TokioDialer),
+            stream: None,
+            idle: None,
+            health,
+        };
+        assert!(conn
+            .call(WireRequest::Vote(VoteRequest {
+                vote: openraft::Vote::new(1, 1),
+                last_log_id: None,
+            }))
+            .await
+            .is_err());
+        assert_eq!(observed.borrow()[&2].attempts, 2);
+    }
+
+    async fn check_disconnect_verification(silent: bool) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut old, _) = listener.accept().await.unwrap();
+            let _: WireRequest = read_frame(&mut old).await.unwrap();
+            drop(old);
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            let WireRequest::Vote(request) = read_frame(&mut fresh).await.unwrap() else {
+                panic!()
+            };
+            if silent {
+                // Probe timeout must close the owned socket and must not be
+                // reported as a second explicit disconnect.
+                let mut byte = [0];
+                assert_eq!(fresh.read(&mut byte).await.unwrap(), 0);
+            } else {
+                write_frame(
+                    &mut fresh,
+                    WireFormat::MessagePack,
+                    &WireResponse::Vote(Ok(VoteResponse {
+                        vote: request.vote,
+                        vote_granted: true,
+                        last_log_id: None,
+                    })),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let health = super::super::peer_health::PeerHealth::default();
+        let observed = health.subscribe();
+        let mut conn = DialerRaftConnection {
+            target: 2,
+            addr: addr.to_string(),
+            format: WireFormat::MessagePack,
+            dialer: Arc::new(TokioDialer),
+            stream: None,
+            idle: None,
+            health,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            conn.call(WireRequest::Vote(VoteRequest {
+                vote: openraft::Vote::new(1, 1),
+                last_log_id: None,
+            })),
+        )
+        .await
+        .unwrap();
+        if silent {
+            assert!(result.is_err());
+            assert_eq!(observed.borrow()[&2].attempts, 1);
+            assert!(conn.stream.is_none());
+        } else {
+            assert!(matches!(result.unwrap(), WireResponse::Vote(Ok(_))));
+            assert!(observed.borrow().is_empty());
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn immediate_reconnect_recovers_a_connection_blip() {
+        check_disconnect_verification(false).await;
+    }
+
+    #[tokio::test]
+    async fn silent_reconnect_is_bounded_and_does_not_confirm_explicit_failure() {
+        check_disconnect_verification(true).await;
+    }
+
+    #[tokio::test]
+    async fn idle_monitor_reuses_socket_and_detects_loss_without_another_rpc() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (kill, killed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let WireRequest::Vote(request) = read_frame(&mut stream).await.unwrap() else {
+                    panic!()
+                };
+                write_frame(
+                    &mut stream,
+                    WireFormat::MessagePack,
+                    &WireResponse::Vote(Ok(VoteResponse {
+                        vote: request.vote,
+                        vote_granted: true,
+                        last_log_id: None,
+                    })),
+                )
+                .await
+                .unwrap();
+            }
+            killed.await.unwrap();
+            drop(listener);
+            drop(stream);
+        });
+        let health = super::super::peer_health::PeerHealth::default();
+        health.set_monitor_idle(true);
+        let mut observed = health.subscribe();
+        let mut conn = DialerRaftConnection {
+            target: 2,
+            addr: addr.to_string(),
+            format: WireFormat::MessagePack,
+            dialer: Arc::new(TokioDialer),
+            stream: None,
+            idle: None,
+            health,
+        };
+        for _ in 0..2 {
+            conn.call(WireRequest::Vote(VoteRequest {
+                vote: openraft::Vote::new(1, 1),
+                last_log_id: None,
+            }))
+            .await
+            .unwrap();
+        }
+        assert!(observed.borrow().is_empty());
+        kill.send(()).unwrap();
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if observed
+                    .borrow_and_update()
+                    .get(&2)
+                    .is_some_and(|failure| failure.attempts >= 2)
+                {
+                    break;
+                }
+                observed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropping_idle_connection_closes_socket_without_suspecting_peer() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let WireRequest::Vote(request) = read_frame(&mut stream).await.unwrap() else {
+                panic!()
+            };
+            write_frame(
+                &mut stream,
+                WireFormat::MessagePack,
+                &WireResponse::Vote(Ok(VoteResponse {
+                    vote: request.vote,
+                    vote_granted: true,
+                    last_log_id: None,
+                })),
+            )
+            .await
+            .unwrap();
+            let mut byte = [0];
+            assert_eq!(stream.read(&mut byte).await.unwrap(), 0);
+        });
+        let health = super::super::peer_health::PeerHealth::default();
+        health.set_monitor_idle(true);
+        let observed = health.subscribe();
+        let mut conn = DialerRaftConnection {
+            target: 2,
+            addr: addr.to_string(),
+            format: WireFormat::MessagePack,
+            dialer: Arc::new(TokioDialer),
+            stream: None,
+            idle: None,
+            health,
+        };
+        conn.call(WireRequest::Vote(VoteRequest {
+            vote: openraft::Vote::new(1, 1),
+            last_log_id: None,
+        }))
+        .await
+        .unwrap();
+        drop(conn);
+        tokio::time::timeout(Duration::from_millis(250), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(observed.borrow().is_empty());
+    }
+
     /// Both wire formats roundtrip a request frame, and a JSON sender talks to
     /// the same decoder a msgpack sender uses (mixed setups are a non-event).
     #[test]
@@ -697,6 +1018,7 @@ mod tests {
             format: WireFormat::MessagePack,
             dialer: Arc::new(TokioDialer),
             stream: None,
+            idle: None,
             health: Default::default(),
         };
         let request = || {

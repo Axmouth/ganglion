@@ -1,6 +1,14 @@
 //! Local transport observations for application failure-detection policy.
 //! These are suspicion signals only; they grant no Raft or application authority.
-use std::{collections::BTreeMap, io, time::Instant};
+use std::{
+    collections::BTreeMap,
+    io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
@@ -12,34 +20,45 @@ pub struct PeerTransportFailure {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PeerHealth(watch::Sender<BTreeMap<u64, PeerTransportFailure>>);
+pub(crate) struct PeerHealth {
+    failures: watch::Sender<BTreeMap<u64, PeerTransportFailure>>,
+    monitor_idle: Arc<AtomicBool>,
+}
 
 impl Default for PeerHealth {
     fn default() -> Self {
-        Self(watch::channel(BTreeMap::new()).0)
+        Self {
+            failures: watch::channel(BTreeMap::new()).0,
+            monitor_idle: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 
 impl PeerHealth {
+    pub(crate) fn set_monitor_idle(&self, enabled: bool) {
+        self.monitor_idle.store(enabled, Ordering::Relaxed);
+    }
+    pub(crate) fn monitor_idle(&self) -> bool {
+        self.monitor_idle.load(Ordering::Relaxed)
+    }
+    pub(crate) fn explicit_failure(kind: io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::UnexpectedEof
+        )
+    }
     pub fn subscribe(&self) -> watch::Receiver<BTreeMap<u64, PeerTransportFailure>> {
-        self.0.subscribe()
+        self.failures.subscribe()
     }
 
     pub fn observe<T>(&self, peer: u64, outcome: &io::Result<T>) {
         let kind = match outcome {
             Ok(_) => None,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::ConnectionRefused
-                        | io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::UnexpectedEof
-                ) =>
-            {
-                Some(error.kind())
-            }
+            Err(error) if Self::explicit_failure(error.kind()) => Some(error.kind()),
             // Timeouts, protocol/TLS failures and cancelled RPCs do not supply
             // explicit process-loss evidence. Heartbeat expiry remains available.
             Err(_) => return,
@@ -48,7 +67,7 @@ impl PeerHealth {
     }
 
     fn record(&self, peer: u64, kind: Option<io::ErrorKind>, now: Instant) {
-        self.0.send_if_modified(|failures| {
+        self.failures.send_if_modified(|failures| {
             match kind {
                 None => failures.remove(&peer).is_some(),
                 Some(kind) => {
