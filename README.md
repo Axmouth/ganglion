@@ -128,3 +128,5 @@ Good candidates to keep in consumers:
 - data-plane promotion and demotion mechanics
 - application-specific settings documents
 - queue or database recovery semantics
+
+Historical design records are indexed in the [archive](archive/README.md).

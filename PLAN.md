@@ -12,32 +12,25 @@ logic should stay in Fibril and adapt to Ganglion's neutral model.
 
 ## Current Consumer Contract
 
-`fibril` consumes coordination through a sync trait built on snapshot reads and a
-`watch::Receiver<CoordinationSnapshot>` (`fibril/crates/broker/src/coordination.rs`); it
-explicitly refuses to host consensus itself (`REPLICATION_PLANNING.md`). Ganglion therefore must
-provide, in priority order:
+Fibril consumes coordination through snapshot reads and a
+`watch::Receiver<CoordinationSnapshot>`, embedding Ganglion's consensus runtime.
+The integration exposes these shared control-plane capabilities:
 
-1. A committed-snapshot watch stream published from consensus apply. This is the integration
-   surface, not an add-on.
+1. A committed-snapshot watch stream published from consensus apply. This is the integration surface.
 2. An embedded controller-capable node: leader-only planning + proposal, replicated commit,
    followers observing the same stream.
 3. Fencing/epoch data alongside assignments (fibril's split-brain defense consumes epochs).
 4. Resource catalogue and opaque replicated attributes for consumer-owned control documents.
 5. Topology and health surfaces suitable for CLI/admin views.
 
-Detailed historical designs live in `DESIGN.md` and `fibril/REPLICATION_PLANNING.md`. The worklog
-tracks what actually landed. `SURFACE_INVENTORY.md` is the current reverse roadmap.
+Detailed historical designs live in `DESIGN.md` and the [historical Fibril integration plan](https://github.com/Axmouth/fibril/blob/main/archive/replication-sharding-plan/REPLICATION_PLANNING.md). The worklog
+preserves historical implementation notes. [SURFACE_INVENTORY.md](SURFACE_INVENTORY.md)
+describes implemented behavior, and [API.md](API.md) defines the current public contract.
 
-## Active plan (non-versioned)
+## Pending engineering work
 
 ### 1) Openraft-backed metadata plane
 
-- DONE: storage adapters (`GanglionLogStore`, `GanglionStateMachine`) pass
-  `openraft::testing::Suite`. In-process network router and `RaftMetadataNode` form real
-  multi-node clusters with `MetadataConsensus`-equivalent semantics (NotLeader/StaleGeneration).
-- DONE: committed-snapshot watch publication from the state machine apply path.
-- DONE: durable WAL-backed raft storage and persistent state-machine snapshots.
-- DONE: TCP transport for real multi-process clusters.
 - NEXT: keep the runtime API small and document the bootstrap/runbook path clearly.
 - NEXT: add remaining failure-mode scenarios for asymmetric partitions and leader-on-minority
   partitions.
@@ -47,10 +40,6 @@ tracks what actually landed. `SURFACE_INVENTORY.md` is the current reverse roadm
 
 ### 2) Generic coordination model
 
-- DONE: generic `ResourceIdentity`, `PartitionAssignment`, durability policy, catalogue, and
-  opaque attributes.
-- DONE: deterministic and least-loaded placement strategies.
-- DONE: owner-change epoch stamping and guarded proposals.
 - NEXT: move downstream provider logic into Ganglion when it is truly domain-free. Likely
   candidates are heartbeat/liveness helpers, guarded attribute publication, catalogue sync, and
   generic controller-loop helpers.
@@ -77,22 +66,19 @@ tracks what actually landed. `SURFACE_INVENTORY.md` is the current reverse roadm
 
 ### 5) Documentation and packaging
 
-- DONE: root README with project positioning and repository map.
-- DONE: surface inventory for implemented behavior and known gaps.
-- DONE: rough examples document for the current library shape.
 - NEXT: operator quickstart for a local multi-node cluster.
 - NEXT: library-consumer guide showing snapshot watches, guarded attributes, and resource
   assignment planning.
-- NEXT: API cleanup pass before treating any crate surface as stable.
+- NEXT: API cleanup before treating the crate surface as stable, including a
+  narrower OpenRaft re-export boundary so dependency upgrades have a smaller
+  downstream impact.
 
 ## Short-term roadmap
 
-1. Finish the first documentation pass: README, examples, surface inventory, current plan, and
-   runbook-oriented failure notes.
-2. Create a generic-extraction inventory for code currently living in Fibril but suitable for
+1. Create a generic-extraction inventory for code currently living in Fibril but suitable for
    Ganglion.
-3. Add missing failure scenarios for asymmetric partitions and leader-on-minority partitions.
-4. Add a consumer-facing example for guarded attributes and resource catalogue writes.
+2. Add missing failure scenarios for asymmetric partitions and leader-on-minority partitions.
+3. Add a consumer-facing example for guarded attributes and resource catalogue writes.
 
 ## Medium-term roadmap
 

@@ -312,51 +312,10 @@ work in reverse-briefness order while keeping one live roadmap block.
 - Reworked `.gitignore` with additional rust-native artifact patterns (`*.dll`, `*.dylib`, `*.rlib`, etc.).
 - Updated `API.md` and active plan/refinement notes to track pluggable strategy surface as implemented.
 
-## Iteration 33 — Openraft context survival doc
 
-- Added `OPENRAFT_SURVIVAL_CONTEXT.md` with version-guarded openraft touchpoints needed for future openraft integration.
-- Captured minimum trait surfaces and key example source files in one place:
-  - type config + payload requirements,
-  - `RaftLogReader`/`RaftLogStorage` implementation surface,
-  - `RaftStateMachine` lifecycle methods,
-  - `RaftNetwork`/`RaftNetworkFactory` wiring and bootstrap lifecycle calls (`Raft::new`, `initialize`, `client_write`, `metrics`, `shutdown`).
-- Explicitly documented the current crate/version mismatch (`openraft = "0.8"` vs local temp clone `0.10.0-alpha.21`) so the next cycle does not drift across API versions.
 
-## Iteration 34 — Survival context consolidation
 
-- Replaced the previous survival context content with a compact 0.8.9-only anchor focused on:
-  - required feature flags (`storage-v2`, `serde`, runtime support),
-  - minimal storage/network/runtime traits,
-  - compaction/snapshot behavior that must stay stable across turns.
-- Scoped the doc to quick recovery needs so context compaction only needs this one page plus `PLAN`/`WORKLOG`.
 
-## Iteration 35 — Survival context compact rewrite
-
-- Rewrote `OPENRAFT_SURVIVAL_CONTEXT.md` into a tighter restart sheet with only essential
-  compile-time API signatures for `openraft = 0.8.9`.
-- Kept the document focused on direct dependency anchors and removed non-essential historical notes
-  to support fast context recovery.
-
-## Iteration 36 — Fast-context openraft survival note
-
-- Finalized `OPENRAFT_SURVIVAL_CONTEXT.md` into a very compact API sheet containing only:
-  - the exact 0.8.9 files/entrypoints to reopen,
-  - trait method list needed to build storage/state-machine/network adapters,
-  - minimal bootstrap sequence.
-- Added explicit version-bound warning that local `~/code/temp/openraft` docs/examples are newer and should
-  not be used as signature authority for this repo.
-- Committed the update as `a312533` with a stable recovery-oriented layout.
-
-## Iteration 37 — Quick survival doc refresh
-
-- Replaced `OPENRAFT_SURVIVAL_CONTEXT.md` with a tighter recovery sheet focused on
-  only the methods and files required to rebuild the openraft path quickly after context compaction:
-  - `RaftTypeConfig`/`declare_raft_types` shape
-  - `RaftLogReader`, `RaftLogStorage`, `RaftStateMachine`, `RaftSnapshotBuilder`
-  - `RaftNetwork`/`RaftNetworkFactory`
-  - core lifecycle calls (`Raft::new`, `initialize`, `client_write`, `shutdown`)
-- Kept the doc intentionally minimal and version-bound for restart reliability.
-- Added a compile-time guard note: openraft 0.8 NodeId must be `Copy`, so external string IDs need adapter mapping.
 
 ## Iteration 38 — Openraft runtime scaffold
 
@@ -365,7 +324,6 @@ work in reverse-briefness order while keeping one live roadmap block.
   - `MetadataRaftCommand` and `MetadataRaftResponse` app payload/response types.
   - `default_raft_config(...)` helper that validates and returns an `Arc<openraft::Config>`.
 - Exported the runtime module from `ganglion-openraft/src/lib.rs` via `pub` re-exports when `openraft` feature is enabled.
-- Reworked `OPENRAFT_SURVIVAL_CONTEXT.md` into a compact, restart-oriented one-pager for 0.8.9.
 - Validation update: `cargo test -p ganglion-openraft --features openraft --no-run` + `cargo test -p ganglion-openraft` both pass.
 
 ## Iteration 39 — Openraft storage adapters pass contract suite
@@ -381,10 +339,6 @@ work in reverse-briefness order while keeping one live roadmap block.
   deterministically inside `apply` (state unchanged, `accepted=false`) — replicated-safe, never an error.
 - **Milestone: `openraft::testing::Suite::test_all` passes against both adapters** (storage
   contract verified by openraft's own suite), plus a direct stale-generation rejection test.
-- Rewrote `OPENRAFT_SURVIVAL_CONTEXT.md` as a verified-facts sheet: implemented-so-far inventory,
-  compile-tested gotchas (trailing comma in `declare_raft_types!`, `LogFlushed` semantics,
-  truncate/purge boundary directions, `StorageIOError` constructors), corrected network trait
-  surface (`append_entries`/`vote`/`install_snapshot` + `RPCOption`; `send_*` are deprecated).
 - Next: in-process `RaftNetwork`/`RaftNetworkFactory` router, then a `RaftMetadataNode` wrapping
   `Raft<GanglionRaftConfig>` behind `MetadataConsensus`.
 

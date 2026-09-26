@@ -2,8 +2,8 @@
 //!
 //! Declares the [`openraft::RaftTypeConfig`] surface, the application
 //! command/response payloads, and the storage adapters used by the
-//! transport-backed `MetadataConsensus` implementation. Network and runtime
-//! node wiring are added incrementally; see `OPENRAFT_SURVIVAL_CONTEXT.md`.
+//! transport-backed runtime. [`RaftMetadataNode`] provides embedded node
+//! startup, committed snapshot observation and guarded metadata writes.
 
 use std::io::Cursor;
 

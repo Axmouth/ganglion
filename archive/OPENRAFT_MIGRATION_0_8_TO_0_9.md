@@ -1,8 +1,11 @@
-# OpenRaft Migration Guide (Ganglion-specific)
+# Historical OpenRaft migration plan
 
-Scope: migrating `ganglion-openraft` off the **0.8.9** line. The current openraft
-stable line is **0.9.24** (target this); **0.10** is alpha-only (`0.10.0-alpha.x`)
-with no official upgrade guide yet, so its section here is provisional.
+Historical scope: migrating `ganglion-openraft` off the **0.8.9** line. The migration target recorded
+by this plan is **0.9.24**. Its **0.10** notes describe the alpha API assessed when
+the plan was written. Recheck upstream releases and migration guidance before
+starting a future upgrade. The current adapter uses the vendored OpenRaft
+0.9.25 tree, so the 0.8-to-0.9 migration checklist is completed historical
+material. Remaining public API cleanup is tracked in [PLAN.md](../PLAN.md).
 
 This is not a generic openraft guide. It maps openraft's documented API changes
 onto the exact places Ganglion touches openraft, so the migration is a checklist,
