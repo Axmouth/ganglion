@@ -11,6 +11,9 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Added
 
+- `RaftMetadataNode::watch_leader` reports this node's view of the current
+  leader and wakes only when it changes.
+
 - Optional idle Raft connection monitoring through `set_monitor_idle_peer_connections`.
   The observer owns the idle stream, returns it before the next RPC, and stops on
   connection cancellation/drop. Explicit closure triggers one bounded reconnect

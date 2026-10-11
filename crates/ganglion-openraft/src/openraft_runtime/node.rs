@@ -488,6 +488,34 @@ impl RaftMetadataNode {
         self.raft.current_leader().await
     }
 
+    /// This node's view of the current leader, updated only when it changes.
+    /// Raft metrics change on every replication step, so callers that only
+    /// care about leadership wake far less often through this. The forwarding
+    /// task ends when the receiver is dropped.
+    pub fn watch_leader(&self) -> tokio::sync::watch::Receiver<Option<NodeId>> {
+        let mut metrics = self.raft.metrics();
+        let (tx, rx) = tokio::sync::watch::channel(metrics.borrow().current_leader);
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    changed = metrics.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let leader = metrics.borrow_and_update().current_leader;
+                        tx.send_if_modified(|current| {
+                            let changed = *current != leader;
+                            *current = leader;
+                            changed
+                        });
+                    }
+                }
+            }
+        });
+        rx
+    }
+
     /// Cheap local leadership check from raft metrics (this node currently
     /// believes it is the leader). For a quorum-confirmed read barrier use
     /// [`Self::ensure_linearizable`].

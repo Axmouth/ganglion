@@ -1221,6 +1221,72 @@ mod tests {
         });
     }
 
+    /// A follower's leader watch reports the first leader, then the new one
+    /// after that leader stops, without polling.
+    #[test]
+    fn watch_leader_reports_each_new_leader() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let timeout = Duration::from_secs(15);
+            let config = std::sync::Arc::new(
+                openraft::Config {
+                    heartbeat_interval: 50,
+                    election_timeout_min: 200,
+                    election_timeout_max: 400,
+                    ..default_raft_config().expect("config").as_ref().clone()
+                }
+                .validate()
+                .expect("config"),
+            );
+            let mut nodes = Vec::new();
+            let mut servers = Vec::new();
+            for id in 1..=3u64 {
+                let dir = unique_dir(&format!("watch-leader-{id}"));
+                let (node, server) =
+                    RaftMetadataNode::start_durable_tcp(id, config.clone(), "127.0.0.1:0", &dir)
+                        .await
+                        .expect("node starts");
+                nodes.push(node);
+                servers.push(server);
+            }
+            let members: BTreeMap<u64, BasicNode> = servers
+                .iter()
+                .enumerate()
+                .map(|(index, server)| {
+                    (index as u64 + 1, BasicNode::new(server.local_addr().to_string()))
+                })
+                .collect();
+            nodes[0].initialize(members).await.expect("initialize");
+            let first = nodes[0].wait_for_any_leader(timeout).await.expect("election");
+            let watcher = (0..3).find(|i| *i as u64 + 1 != first).expect("a follower");
+            let mut leader = nodes[watcher].watch_leader();
+            tokio::time::timeout(timeout, leader.wait_for(|l| *l == Some(first)))
+                .await
+                .expect("watch sees the first leader")
+                .expect("watch open");
+
+            let index = (first - 1) as usize;
+            servers[index].shutdown();
+            nodes[index].shutdown().await.expect("leader shutdown");
+            let next = tokio::time::timeout(timeout, leader.wait_for(|l| l.is_some_and(|l| l != first)))
+                .await
+                .expect("watch sees a new leader")
+                .expect("watch open")
+                .expect("leader present");
+            assert_ne!(next, first);
+            for (i, node) in nodes.iter().enumerate() {
+                if i != index {
+                    node.shutdown().await.expect("shutdown");
+                }
+            }
+        });
+    }
+
     /// FAILURE_MODES §2.1 at the TCP level: a follower's listener dies (the
     /// process lives), the quorum keeps committing, and re-binding the
     /// listener on the same address lets the follower catch up — no restart.
