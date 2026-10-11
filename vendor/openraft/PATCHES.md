@@ -9,7 +9,7 @@ Licenses are retained from the upstream tag.
 ## Retry an empty log read without reporting progress
 
 Rust source changes are limited to `src/replication/mod.rs` and
-`src/core/raft_core.rs`. Version 0.9.24
+`src/core/raft_core.rs`, for this fix and the log level patch below. Version 0.9.24
 panics when a nonempty replication range reads no entries. Version 0.9.25
 turns that read into a heartbeat, but still uses the data request ID: at index
 zero this reports `matching=None` and fails the core's progress assertion.
@@ -27,6 +27,14 @@ Ganglion's subprocess regression injects repeated empty reads at index zero and
 after an established prefix, fails on background panics even if the caller
 otherwise succeeds, and checks step-down cancellation during persistent retries. Remove this vendored copy when
 an upstream release passes that regression. No issue or PR has been submitted.
+
+## Log unreachable peers as warnings
+
+`while requesting vote` and the replication `RPCError` log use warn instead of
+error when the RPC failed with `Unreachable`. A stopped peer is expected during
+failover, and error level there buried real faults in demo and operator logs.
+Timeouts and every other RPC error still log at error. This is a log level
+change only and can be dropped with the vendored copy.
 
 The adapter uses a path dependency so Git consumers receive the same fix.
 It deliberately has no registry-version fallback: publishing the adapter to

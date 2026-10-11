@@ -32,6 +32,10 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Changed
 
+- The vendored OpenRaft logs vote and replication RPCs that fail with
+  `Unreachable` at warn instead of error. A stopped peer is routine during
+  failover. Timeouts and other RPC errors still log at error.
+
 - Explicit Raft RPC disconnects are verified by one immediate retry with a 200 ms
   deadline. A successful exchange clears suspicion; failed/cancelled exchanges
   discard their socket so late replies cannot leak into another request.

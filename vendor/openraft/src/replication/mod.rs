@@ -281,7 +281,12 @@ where
                             return Ok(());
                         }
                         ReplicationError::RPCError(err) => {
-                            tracing::error!(err = display(&err), "RPCError");
+                            // Ganglion patch: a stopped peer is routine during failover.
+                            if matches!(err, RPCError::Unreachable(_)) {
+                                tracing::warn!(err = display(&err), "RPCError");
+                            } else {
+                                tracing::error!(err = display(&err), "RPCError");
+                            }
 
                             let retry = match &err {
                                 RPCError::Timeout(_) => false,

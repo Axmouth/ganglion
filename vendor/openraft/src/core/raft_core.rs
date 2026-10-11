@@ -1109,6 +1109,8 @@ where
                                     sender_vote: vote,
                                 });
                             }
+                            // Ganglion patch: a stopped peer is routine during failover.
+                            Err(err @ RPCError::Unreachable(_)) => tracing::warn!({error=%err, target=display(&target)}, "while requesting vote"),
                             Err(err) => tracing::error!({error=%err, target=display(&target)}, "while requesting vote"),
                         }
                     }
