@@ -285,6 +285,19 @@ impl GanglionStateMachine {
         read(&inner.state)
     }
 
+    /// `read_committed`, also passing the last applied log id. Every change to
+    /// the committed state moves the id, so it can key values derived from it.
+    pub fn read_committed_at<R>(
+        &self,
+        read: impl FnOnce(Option<LogId<NodeId>>, &CoordinationSnapshot) -> R,
+    ) -> R {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        read(inner.last_applied, &inner.state)
+    }
+
     /// Current committed coordination snapshot.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.inner

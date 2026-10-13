@@ -452,6 +452,15 @@ impl RaftMetadataNode {
         self.state_machine.read_committed(read)
     }
 
+    /// `read_committed`, also passing the last applied log id. Every change to
+    /// the committed state moves the id, so it can key values derived from it.
+    pub fn read_committed_at<R>(
+        &self,
+        read: impl FnOnce(Option<openraft::LogId<NodeId>>, &CoordinationSnapshot) -> R,
+    ) -> R {
+        self.state_machine.read_committed_at(read)
+    }
+
     /// Committed coordination snapshot as applied on this node.
     pub fn committed_snapshot(&self) -> CoordinationSnapshot {
         self.state_machine.committed_snapshot()
