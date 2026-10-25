@@ -35,6 +35,13 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Changed
 
+- The file raft log store writes and syncs on its own thread. An append
+  returns once its entries are indexed and reports the flush to openraft when
+  the sync finishes, so the raft core no longer holds a runtime worker for a
+  disk sync, which took 34-43 ms under heavy disk load. Votes and truncations
+  wait for their sync without blocking a worker, appends queued together share
+  one sync, and a failed write fails every later one.
+
 - The vendored OpenRaft logs vote and replication RPCs that fail with
   `Unreachable` at warn instead of error. A stopped peer is routine during
   failover. Timeouts and other RPC errors still log at error.

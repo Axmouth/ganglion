@@ -37,7 +37,7 @@ enum WalRecord {
     },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct DurableState {
     vote: Option<Vote<NodeId>>,
     log: BTreeMap<u64, Entry<GanglionRaftConfig>>,
@@ -71,18 +71,168 @@ impl DurableState {
 
 struct DurableInner {
     state: DurableState,
-    file: File,
 }
 
-/// Durable raft log + vote store persisted as a JSON-lines WAL.
+/// Raft log + vote store persisted as a JSON-lines WAL. Writes and syncs run
+/// on the WAL's own thread, so a raft task never holds a runtime worker for a
+/// disk sync.
 #[derive(Clone)]
 pub struct FileRaftLogStore {
     path: PathBuf,
     inner: Arc<Mutex<DurableInner>>,
+    wal: Arc<WalWriter>,
     telemetry: Arc<StorageTelemetry>,
     /// Test-only failure injection (FAILURE_MODES §3.1): when set, write paths
     /// fail like a dying disk so fail-stop behavior can be asserted.
     fail_writes: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What a WAL write reports to once it is synced.
+enum WalDone {
+    /// An append: openraft's flush callback.
+    Flushed(LogFlushed<GanglionRaftConfig>),
+    /// A vote, truncate or drain the caller waits for.
+    Notify(tokio::sync::oneshot::Sender<std::io::Result<()>>),
+}
+
+impl WalDone {
+    fn complete(self, result: std::io::Result<()>) {
+        match self {
+            Self::Flushed(callback) => callback.log_io_completed(result),
+            Self::Notify(tx) => {
+                let _ = tx.send(result);
+            }
+        }
+    }
+}
+
+enum WalJob {
+    /// Append `bytes` and sync. Empty bytes only wait for earlier writes.
+    Write { bytes: Vec<u8>, done: WalDone },
+    /// Continue on a file reopened after a rewrite.
+    Replace {
+        file: File,
+        done: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+/// Single writer thread for one WAL. Jobs run in submission order, and jobs
+/// queued together share one sync. After a failed write or sync every later
+/// write fails too, since the file's tail is no longer known.
+struct WalWriter {
+    tx: Mutex<std::sync::mpsc::Sender<WalJob>>,
+}
+
+impl WalWriter {
+    fn start(file: File, telemetry: Arc<StorageTelemetry>) -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::channel::<WalJob>();
+        std::thread::Builder::new()
+            .name("ganglion-wal".into())
+            .spawn(move || Self::run(file, rx, telemetry))?;
+        Ok(Self { tx: Mutex::new(tx) })
+    }
+
+    fn run(
+        mut file: File,
+        rx: std::sync::mpsc::Receiver<WalJob>,
+        telemetry: Arc<StorageTelemetry>,
+    ) {
+        let mut failed: Option<String> = None;
+        while let Ok(first) = rx.recv() {
+            let mut jobs = vec![first];
+            jobs.extend(rx.try_iter());
+            let mut waiting = Vec::new();
+            let mut bytes = Vec::new();
+            for job in jobs {
+                match job {
+                    WalJob::Write { bytes: b, done } => {
+                        bytes.extend_from_slice(&b);
+                        waiting.push(done);
+                    }
+                    WalJob::Replace { file: next, done } => {
+                        // A rewrite drains first, so nothing is pending here.
+                        Self::flush(&mut file, &mut bytes, &mut waiting, &mut failed, &telemetry);
+                        file = next;
+                        let _ = done.send(());
+                    }
+                }
+            }
+            Self::flush(&mut file, &mut bytes, &mut waiting, &mut failed, &telemetry);
+        }
+    }
+
+    fn flush(
+        file: &mut File,
+        bytes: &mut Vec<u8>,
+        waiting: &mut Vec<WalDone>,
+        failed: &mut Option<String>,
+        telemetry: &StorageTelemetry,
+    ) {
+        if waiting.is_empty() {
+            return;
+        }
+        let result = match failed {
+            Some(error) => Err(std::io::Error::other(error.clone())),
+            None if bytes.is_empty() => Ok(()),
+            None => {
+                let result = file.write_all(bytes).and_then(|()| file.sync_data());
+                if let Err(error) = &result {
+                    *failed = Some(format!("raft WAL write failed earlier: {error}"));
+                } else {
+                    telemetry
+                        .fsyncs
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                result
+            }
+        };
+        bytes.clear();
+        for done in waiting.drain(..) {
+            done.complete(match &result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(std::io::Error::new(error.kind(), error.to_string())),
+            });
+        }
+    }
+
+    fn submit(&self, job: WalJob) {
+        let tx = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(std::sync::mpsc::SendError(job)) = tx.send(job) {
+            let error = || std::io::Error::other("raft WAL writer stopped");
+            match job {
+                WalJob::Write { done, .. } => done.complete(Err(error())),
+                WalJob::Replace { .. } => {}
+            }
+        }
+    }
+
+    /// Write `bytes`, sync and wait. Empty bytes wait for earlier writes.
+    async fn write(&self, bytes: Vec<u8>) -> std::io::Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.submit(WalJob::Write {
+            bytes,
+            done: WalDone::Notify(tx),
+        });
+        rx.await
+            .unwrap_or_else(|_| Err(std::io::Error::other("raft WAL writer stopped")))
+    }
+
+    async fn replace(&self, file: File) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let sent = {
+            let sender = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            sender.send(WalJob::Replace { file, done: tx }).is_ok()
+        };
+        if sent {
+            let _ = rx.await;
+        }
+    }
+}
+
+fn encode_record(record: &WalRecord) -> Result<Vec<u8>, StorageError<NodeId>> {
+    let mut line = serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
+    line.push(b'\n');
+    Ok(line)
 }
 
 impl FileRaftLogStore {
@@ -119,7 +269,7 @@ impl FileRaftLogStore {
         }
 
         let created = !path.exists();
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
@@ -140,36 +290,19 @@ impl FileRaftLogStore {
             replayed_records as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
+        if needs_compaction {
+            file = Self::rewrite(&path, &state, &telemetry)?;
+        }
+        let wal = WalWriter::start(file, Arc::clone(&telemetry))
+            .map_err(|error| StorageIOError::write_logs(&error))?;
 
-        let store = Self {
+        Ok(Self {
             path,
-            inner: Arc::new(Mutex::new(DurableInner { state, file })),
+            inner: Arc::new(Mutex::new(DurableInner { state })),
+            wal: Arc::new(wal),
             telemetry,
             fail_writes: Arc::default(),
-        };
-        if needs_compaction {
-            let mut inner = store
-                .inner
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            store.rewrite(&mut inner)?;
-        }
-        Ok(store)
-    }
-
-    fn write_record(
-        inner: &mut DurableInner,
-        record: &WalRecord,
-    ) -> Result<(), StorageError<NodeId>> {
-        let mut line =
-            serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
-        line.push(b'\n');
-        inner
-            .file
-            .write_all(&line)
-            .and_then(|()| inner.file.sync_data())
-            .map_err(|error| StorageIOError::write_logs(&error))?;
-        Ok(())
+        })
     }
 
     /// Simulate a dying disk: all subsequent writes fail (test hook).
@@ -196,86 +329,101 @@ impl FileRaftLogStore {
         self.telemetry.snapshot()
     }
 
-    /// Rewrite the WAL compacted to current state (used after purge).
-    fn rewrite(&self, inner: &mut DurableInner) -> Result<(), StorageError<NodeId>> {
-        let tmp_path = self.path.with_extension("tmp");
+    /// Rewrite the WAL compacted to `state` and return the reopened file. The
+    /// writer must have no write in flight.
+    fn rewrite(
+        path: &std::path::Path,
+        state: &DurableState,
+        telemetry: &StorageTelemetry,
+    ) -> Result<File, StorageError<NodeId>> {
+        let tmp_path = path.with_extension("tmp");
         let mut tmp =
             File::create(&tmp_path).map_err(|error| StorageIOError::write_logs(&error))?;
 
         let mut write_line = |record: &WalRecord| -> Result<(), StorageError<NodeId>> {
-            let mut line =
-                serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
-            line.push(b'\n');
-            tmp.write_all(&line)
+            tmp.write_all(&encode_record(record)?)
                 .map_err(|error| StorageIOError::write_logs(&error))?;
             Ok(())
         };
 
-        if let Some(vote) = inner.state.vote {
+        if let Some(vote) = state.vote {
             write_line(&WalRecord::Vote(vote))?;
         }
-        if let Some(upto) = inner.state.last_purged_log_id {
+        if let Some(upto) = state.last_purged_log_id {
             write_line(&WalRecord::Purge { upto })?;
         }
-        for entry in inner.state.log.values() {
+        for entry in state.log.values() {
             write_line(&WalRecord::Entry(entry.clone()))?;
         }
         tmp.sync_data()
             .map_err(|error| StorageIOError::write_logs(&error))?;
         drop(tmp);
 
-        std::fs::rename(&tmp_path, &self.path)
-            .map_err(|error| StorageIOError::write_logs(&error))?;
-        super::fsync_parent_dir(&self.path).map_err(|error| StorageIOError::write_logs(&error))?;
-        inner.file = OpenOptions::new()
+        std::fs::rename(&tmp_path, path).map_err(|error| StorageIOError::write_logs(&error))?;
+        super::fsync_parent_dir(path).map_err(|error| StorageIOError::write_logs(&error))?;
+        let file = OpenOptions::new()
             .append(true)
-            .open(&self.path)
+            .open(path)
             .map_err(|error| StorageIOError::write_logs(&error))?;
         use std::sync::atomic::Ordering::Relaxed;
-        self.telemetry.compactions.fetch_add(1, Relaxed);
-        self.telemetry.fsyncs.fetch_add(2, Relaxed); // tmp data + parent dir
-        Ok(())
+        telemetry.compactions.fetch_add(1, Relaxed);
+        telemetry.fsyncs.fetch_add(2, Relaxed); // tmp data + parent dir
+        Ok(file)
     }
 
-    /// Persist and index a batch of entries with a single fsync
-    /// (shared by the trait impl and tests).
-    fn append_entries(
+    /// Index a batch of entries and queue it for the WAL with one sync.
+    /// `done` hears once the batch is durable.
+    fn queue_entries(
         &self,
         entries: impl IntoIterator<Item = Entry<GanglionRaftConfig>>,
+        done: WalDone,
     ) -> Result<(), StorageError<NodeId>> {
-        self.check_injected_failure()
-            .map_err(|error| StorageIOError::write_logs(&error))?;
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = self.check_injected_failure() {
+            let storage_error = StorageIOError::write_logs(&error);
+            done.complete(Err(error));
+            return Err(storage_error.into());
+        }
         let mut batch = Vec::new();
         let mut staged = Vec::new();
         for entry in entries {
-            let line = serde_json::to_vec(&WalRecord::Entry(entry.clone()))
-                .map_err(|error| StorageIOError::write_logs(&error))?;
-            batch.extend_from_slice(&line);
-            batch.push(b'\n');
+            batch.extend_from_slice(&encode_record(&WalRecord::Entry(entry.clone()))?);
             staged.push(entry);
         }
         if staged.is_empty() {
+            done.complete(Ok(()));
             return Ok(());
         }
-        inner
-            .file
-            .write_all(&batch)
-            .and_then(|()| inner.file.sync_data())
-            .map_err(|error| StorageIOError::write_logs(&error))?;
         use std::sync::atomic::Ordering::Relaxed;
         self.telemetry
             .appended_records
             .fetch_add(staged.len() as u64, Relaxed);
         self.telemetry.appended_batches.fetch_add(1, Relaxed);
-        self.telemetry.fsyncs.fetch_add(1, Relaxed);
-        for entry in staged {
-            inner.state.log.insert(entry.log_id.index, entry);
+        {
+            // Entries are readable before they are durable, as openraft
+            // expects of an append that reports its flush later.
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for entry in staged {
+                inner.state.log.insert(entry.log_id.index, entry);
+            }
         }
+        self.wal.submit(WalJob::Write { bytes: batch, done });
         Ok(())
+    }
+
+    /// Persist and index a batch of entries, waiting for the sync (tests).
+    #[cfg(test)]
+    async fn append_entries(
+        &self,
+        entries: impl IntoIterator<Item = Entry<GanglionRaftConfig>>,
+    ) -> Result<(), StorageError<NodeId>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.queue_entries(entries, WalDone::Notify(tx))?;
+        rx.await
+            .unwrap_or_else(|_| Err(std::io::Error::other("raft WAL writer stopped")))
+            .map_err(|error| StorageIOError::write_logs(&error).into())
     }
 }
 
@@ -328,15 +476,15 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
         self.check_injected_failure()
             .map_err(|error| StorageIOError::write_vote(&error))?;
-        let mut inner = self
-            .inner
+        self.wal
+            .write(encode_record(&WalRecord::Vote(*vote))?)
+            .await
+            .map_err(|error| StorageIOError::write_vote(&error))?;
+        self.inner
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::write_record(&mut inner, &WalRecord::Vote(*vote))?;
-        self.telemetry
-            .fsyncs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        inner.state.vote = Some(*vote);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state
+            .vote = Some(*vote);
         Ok(())
     }
 
@@ -358,52 +506,55 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
         I: IntoIterator<Item = Entry<GanglionRaftConfig>> + Send,
         I::IntoIter: Send,
     {
-        match self.append_entries(entries) {
-            Ok(()) => {
-                callback.log_io_completed(Ok(()));
-                Ok(())
-            }
-            Err(error) => {
-                callback.log_io_completed(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    error.to_string(),
-                )));
-                Err(error)
-            }
-        }
+        self.queue_entries(entries, WalDone::Flushed(callback))
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::write_record(
-            &mut inner,
-            &WalRecord::Truncate {
+        self.wal
+            .write(encode_record(&WalRecord::Truncate {
                 since: log_id.index,
-            },
-        )?;
-        inner.state.log.split_off(&log_id.index);
+            })?)
+            .await
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state
+            .log
+            .split_off(&log_id.index);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Purge points never move backwards.
-        if inner
-            .state
-            .last_purged_log_id
-            .is_none_or(|purged| log_id.index > purged.index)
-        {
-            inner.state.last_purged_log_id = Some(log_id);
-        }
-        let retained = inner.state.log.split_off(&(log_id.index + 1));
-        inner.state.log = retained;
-        self.rewrite(&mut inner)
+        let state = {
+            let mut inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Purge points never move backwards.
+            if inner
+                .state
+                .last_purged_log_id
+                .is_none_or(|purged| log_id.index > purged.index)
+            {
+                inner.state.last_purged_log_id = Some(log_id);
+            }
+            let retained = inner.state.log.split_off(&(log_id.index + 1));
+            inner.state.log = retained;
+            inner.state.clone()
+        };
+        // Compact once every queued write is on disk, off the runtime.
+        self.wal
+            .write(Vec::new())
+            .await
+            .map_err(|error| StorageIOError::write_logs(&error))?;
+        let path = self.path.clone();
+        let telemetry = Arc::clone(&self.telemetry);
+        let file = tokio::task::spawn_blocking(move || Self::rewrite(&path, &state, &telemetry))
+            .await
+            .map_err(|error| StorageIOError::write_logs(&std::io::Error::other(error)))??;
+        self.wal.replace(file).await;
+        Ok(())
     }
 }
 
@@ -478,6 +629,7 @@ mod tests {
 
                 store
                     .append_entries((1..=5).map(|index| make_entry(index, index)))
+                    .await
                     .expect("append should persist");
 
                 store
@@ -635,7 +787,7 @@ mod tests {
                                     .collect();
                                 model_appended += entries.len() as u64;
                                 model_batches += 1;
-                                store.append_entries(entries).expect("append");
+                                store.append_entries(entries).await.expect("append");
                             }
                             WalOp::Truncate { back } => {
                                 if let Some(last) = model_log.last().copied() {
