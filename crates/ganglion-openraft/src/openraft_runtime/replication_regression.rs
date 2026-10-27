@@ -32,7 +32,7 @@ impl RaftLogReader<GanglionRaftConfig> for EmptyReads {
         if !entries.is_empty()
             && self
                 .remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_ok()
         {
             self.injected.fetch_add(1, Ordering::SeqCst);
