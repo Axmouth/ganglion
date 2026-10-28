@@ -43,6 +43,16 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Changed
 
+- The collections in `CoordinationSnapshot` (`nodes`, `assignments`,
+  `resources`, `attributes`) are `Shared<T>`, copy-on-write wrappers around
+  the same maps and sets. Copying a snapshot no longer copies its contents,
+  and changing one collection copies only that one, and only while another
+  snapshot still shares it. The state machine hands a snapshot to every
+  applied entry's reply and to every watcher, so a heartbeat no longer copies
+  every attribute. Reads work as before through `Deref`. Code that needs the
+  plain collection calls `into_inner()`, and code that builds a snapshot
+  converts with `.into()`. The serialized format is unchanged.
+
 - The file raft log store writes and syncs on its own thread. An append
   returns once its entries are indexed and reports the flush to openraft when
   the sync finishes, so the raft core no longer holds a runtime worker for a

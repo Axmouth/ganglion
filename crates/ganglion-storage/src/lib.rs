@@ -84,10 +84,10 @@ fn encode_snapshot(
         .collect::<Result<BTreeMap<_, _>, MetadataLogError>>()?;
 
     Ok(PersistedCoordinationSnapshot {
-        nodes: snapshot.nodes.clone(),
+        nodes: snapshot.nodes.clone().into_inner(),
         assignments,
-        resources: snapshot.resources.clone(),
-        attributes: snapshot.attributes.clone(),
+        resources: snapshot.resources.clone().into_inner(),
+        attributes: snapshot.attributes.clone().into_inner(),
         generation: snapshot.generation,
     })
 }
@@ -106,10 +106,10 @@ fn decode_snapshot(
         .collect::<Result<BTreeMap<_, _>, MetadataLogError>>()?;
 
     Ok(CoordinationSnapshot {
-        nodes: snapshot.nodes,
-        assignments,
-        resources: snapshot.resources,
-        attributes: snapshot.attributes,
+        nodes: snapshot.nodes.into(),
+        assignments: assignments.into(),
+        resources: snapshot.resources.into(),
+        attributes: snapshot.attributes.into(),
         generation: snapshot.generation,
     })
 }

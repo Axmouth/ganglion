@@ -217,8 +217,8 @@ mod tests {
         );
 
         CoordinationSnapshot {
-            nodes,
-            assignments,
+            nodes: nodes.into(),
+            assignments: assignments.into(),
             generation: 7,
             ..CoordinationSnapshot::default()
         }

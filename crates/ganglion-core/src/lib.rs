@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod shared;
+pub use shared::Shared;
+
 /// Stable identifier for a sharded logical resource (queue, partition, etc.).
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ResourceIdentity {
@@ -249,33 +252,33 @@ pub fn stamp_assignment_epochs(
 /// Full control-plane snapshot, including all known node and assignment state.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CoordinationSnapshot {
-    pub nodes: BTreeMap<String, NodeInfo>,
+    pub nodes: Shared<BTreeMap<String, NodeInfo>>,
     /// Serialized as a sequence of `(resource, assignment)` pairs:
     /// `ResourceIdentity` is a struct key, which JSON maps cannot express
     /// (`key must be a string`), and the raft WAL/snapshot files are JSON.
     #[serde(with = "assignment_pairs")]
-    pub assignments: BTreeMap<ResourceIdentity, PartitionAssignment>,
+    pub assignments: Shared<BTreeMap<ResourceIdentity, PartitionAssignment>>,
     /// Cluster queue/resource catalogue: declared resources that want
     /// assignments. Kept separate from `assignments` (catalogue ≠ placement);
     /// the controller assigns owners/followers for catalogue entries.
     /// `serde(default)` keeps pre-catalogue snapshots/WALs loading.
     #[serde(default)]
-    pub resources: BTreeSet<ResourceIdentity>,
+    pub resources: Shared<BTreeSet<ResourceIdentity>>,
     /// Cluster-level attribute store for consumer-defined replicated settings
     /// (e.g. fibril runtime settings). Values are opaque to ganglion;
     /// consumers own their versioning/conflict rules inside the value.
     #[serde(default)]
-    pub attributes: BTreeMap<String, String>,
+    pub attributes: Shared<BTreeMap<String, String>>,
     pub generation: u64,
 }
 
 impl Default for CoordinationSnapshot {
     fn default() -> Self {
         Self {
-            nodes: BTreeMap::new(),
-            assignments: BTreeMap::new(),
-            resources: BTreeSet::new(),
-            attributes: BTreeMap::new(),
+            nodes: Shared::default(),
+            assignments: Shared::default(),
+            resources: Shared::default(),
+            attributes: Shared::default(),
             generation: 0,
         }
     }
@@ -303,12 +306,12 @@ impl CoordinationSnapshot {
 
 /// Map<ResourceIdentity, _> as a pair sequence (JSON-safe map keys).
 mod assignment_pairs {
-    use super::{PartitionAssignment, ResourceIdentity};
+    use super::{PartitionAssignment, ResourceIdentity, Shared};
     use serde::{Deserialize, Deserializer, Serializer};
     use std::collections::BTreeMap;
 
     pub fn serialize<S: Serializer>(
-        map: &BTreeMap<ResourceIdentity, PartitionAssignment>,
+        map: &Shared<BTreeMap<ResourceIdentity, PartitionAssignment>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.collect_seq(map.iter())
@@ -316,9 +319,9 @@ mod assignment_pairs {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<BTreeMap<ResourceIdentity, PartitionAssignment>, D::Error> {
+    ) -> Result<Shared<BTreeMap<ResourceIdentity, PartitionAssignment>>, D::Error> {
         let pairs = Vec::<(ResourceIdentity, PartitionAssignment)>::deserialize(deserializer)?;
-        Ok(pairs.into_iter().collect())
+        Ok(Shared::new(pairs.into_iter().collect()))
     }
 }
 
@@ -404,10 +407,10 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
         if resources.is_empty() {
             return Ok(PlacementPlan {
                 snapshot: CoordinationSnapshot {
-                    nodes: input.nodes,
-                    assignments: BTreeMap::new(),
-                    resources: BTreeSet::new(),
-                    attributes: BTreeMap::new(),
+                    nodes: input.nodes.into(),
+                    assignments: BTreeMap::new().into(),
+                    resources: BTreeSet::new().into(),
+                    attributes: BTreeMap::new().into(),
                     generation: input.generation,
                 },
             });
@@ -447,10 +450,10 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
 
         Ok(PlacementPlan {
             snapshot: CoordinationSnapshot {
-                nodes: input.nodes,
-                assignments,
-                resources: BTreeSet::new(),
-                attributes: BTreeMap::new(),
+                nodes: input.nodes.into(),
+                assignments: assignments.into(),
+                resources: BTreeSet::new().into(),
+                attributes: BTreeMap::new().into(),
                 generation: input.generation,
             },
         })
@@ -474,10 +477,10 @@ impl PartitionPlacementPolicy for LeastLoadedPartitionPlacement {
         if resources.is_empty() {
             return Ok(PlacementPlan {
                 snapshot: CoordinationSnapshot {
-                    nodes: input.nodes,
-                    assignments: BTreeMap::new(),
-                    resources: BTreeSet::new(),
-                    attributes: BTreeMap::new(),
+                    nodes: input.nodes.into(),
+                    assignments: BTreeMap::new().into(),
+                    resources: BTreeSet::new().into(),
+                    attributes: BTreeMap::new().into(),
                     generation: input.generation,
                 },
             });
@@ -530,10 +533,10 @@ impl PartitionPlacementPolicy for LeastLoadedPartitionPlacement {
 
         Ok(PlacementPlan {
             snapshot: CoordinationSnapshot {
-                nodes: input.nodes,
-                assignments,
-                resources: BTreeSet::new(),
-                attributes: BTreeMap::new(),
+                nodes: input.nodes.into(),
+                assignments: assignments.into(),
+                resources: BTreeSet::new().into(),
+                attributes: BTreeMap::new().into(),
                 generation: input.generation,
             },
         })
@@ -993,14 +996,14 @@ mod tests {
 
         let resolved = PlacementStrategy::Deterministic.as_strategy();
         let snapshot = CoordinationSnapshot {
-            nodes: sample_nodes(),
-            assignments: BTreeMap::new(),
+            nodes: sample_nodes().into(),
+            assignments: BTreeMap::new().into(),
             generation: 0,
             ..CoordinationSnapshot::default()
         };
         let plan = resolved
             .plan(PlacementInput {
-                nodes: snapshot.nodes.clone(),
+                nodes: snapshot.nodes.clone().into_inner(),
                 resources: vec![],
                 existing: BTreeMap::new(),
                 target_followers: 0,
