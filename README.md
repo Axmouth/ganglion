@@ -97,10 +97,10 @@ scripts/cluster-playground.sh --script "status; write 1; status; quit"
 ```
 
 For basic usage examples, see [EXAMPLES.md](EXAMPLES.md). For the current public
-surface, see [API.md](API.md). For the reverse roadmap of implemented behavior,
-see [SURFACE_INVENTORY.md](SURFACE_INVENTORY.md). For the active design and
-roadmap, see [PLAN.md](PLAN.md). For failure behavior and runbook notes, see
-[FAILURE_MODES.md](FAILURE_MODES.md).
+surface and what is still partial or planned per crate, see [API.md](API.md).
+For the active design and roadmap, see [PLAN.md](PLAN.md). For the fallback
+scenario harness, see [tests/jepsen/README.md](tests/jepsen/README.md). For
+failure behavior and runbook notes, see [FAILURE_MODES.md](FAILURE_MODES.md).
 
 ## Relationship To Consumers
 

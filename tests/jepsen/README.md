@@ -38,8 +38,11 @@ It accepts:
 Environment variable:
 - `GANGLION_PERSISTED_REPLAY_PROFILE` (resolved default is `default`).
 
-If Clojure/Jepsen is not available in the environment, scenario scripts will emit
-`SKIPPED` and still write a log file so orchestration can continue.
+No Jepsen/Clojure harness is wired yet. Every scenario runs a fallback set of
+focused Rust tests (see the inventory below). When `clojure` is on `PATH`,
+scenarios 01-05 print a placeholder and exit without running checks, while 06-08
+always run their Rust checks. Either way each scenario writes a log file so
+orchestration can continue.
 
 `validate-summary.json` also includes `startup_smoke` with `requested` and `result` fields (`pass`/`skipped`/`fail` behavior), aligned with other run phases.
 
@@ -57,7 +60,7 @@ If a broad `scripts/validate.sh` or `tests/jepsen/run.sh all` invocation appears
 - `tests/jepsen/run.sh all` always writes:
   - `<scenario>.json` for each executable scenario
   - `run-summary.json` with `scenario_count` and `failed_scenarios`
-- `scripts/validate.sh` now treats missing/partial Jepsen artifacts as a run failure in `validate-summary.json`.
+- `scripts/validate.sh` treats missing/partial Jepsen artifacts as a run failure in `validate-summary.json`.
 - Practical sequence before rerunning aggregate:
   1. `tests/jepsen/run.sh scenario <name>` and confirm `<name>.json` and `<name>.log` appear.
   2. `ls <artifact-dir>/run-summary.json` and confirm it includes all scenario entries.
@@ -65,17 +68,49 @@ If a broad `scripts/validate.sh` or `tests/jepsen/run.sh all` invocation appears
 
 ## Scenario inventory
 
-- `01-baseline-failover.sh`
-- `02-partition-split-brain.sh`
-- `03-crash-recovery.sh`
-- `04-startup-entrypoint-smoke.sh`
-- `05-startup-policy-matrix.sh`
-- `06-persistence-backend-parity.sh`
+The fallback scenarios exercise both node families: the legacy `InMemoryMetadataNode` and
+`PersistedMetadataNode` (01-06) and the openraft runtime `RaftMetadataNode` (07-08). Each script
+prints its expected invariants, which `run.sh` copies into the scenario summary.
 
-## Current status
+- `01-baseline-failover.sh`: control-loop publishing over persisted and in-memory nodes.
+  Accepted proposals stay monotonic in committed generation, followers reject stale writes from
+  non-leaders, and rejected proposals publish nothing.
+- `02-partition-split-brain.sh`: generated publish and rejection matrices. Only one leader's
+  writes persist per generation, conflicting generations are never both accepted, and term and
+  generation rejections hold.
+- `03-crash-recovery.sh`: restart applies the term bump, stale terms are rejected, and corrupt
+  or non-sequential file logs are rejected.
+- `04-startup-entrypoint-smoke.sh`: every persisted startup constructor runs and resolves its
+  replay profile deterministically.
+- `05-startup-policy-matrix.sh`: profile precedence is explicit over environment over default,
+  and strict, default and tail profiles behave differently on malformed tails.
+- `06-persistence-backend-parity.sh`: file and Keratin metadata logs match on bounded-tail
+  recovery, strict mode rejects non-sequential boundaries, and restart and failover ordering
+  rejects stale terms after a higher-term write. Runs the storage tests with `--features keratin`.
+- `07-raft-runtime-failover.sh`: the openraft runtime. A 3-node cluster elects, replicates and
+  rejects stale generations after consensus, survivors re-elect after leader loss, a partitioned
+  follower rejoins and converges, a durable node recovers from its WAL after restart, a learner
+  joins and is promoted, and the file log store passes the openraft contract suite and survives
+  reopen after vote, log and purge records.
+- `08-playground-smoke.sh`: scripted run of `scripts/cluster-playground.sh` through write, kill,
+  write during the outage, restart, add and promote, remove, final write and quit. Each step's
+  output is asserted and the playground must exit cleanly within 180 s.
 
-- Scenario orchestration is available with a local fallback that runs focused Rust smoke checks when a Jepsen/Clojure runtime is unavailable.
-- Each run produces both human-readable logs and machine-readable scenario summaries:
-  - `<scenario>.log` and `<scenario>.json` under `tests/jepsen/artifacts/`
-  - `run-summary.json` with aggregate scenario status for `all` and `scenario` commands
-- Placeholder harness hooks remain for future direct Jepsen wiring.
+## Artifact contract
+
+- Each scenario writes `<scenario>.log` and `<scenario>.json` under the artifact directory
+  (default `tests/jepsen/artifacts/`, override with `--artifact-dir`).
+- `<scenario>.json` holds `scenario`, `path`, `status` (`pass` or `fail`), `exit_code`, `log` and
+  `expected_invariants`.
+- `run-summary.json` is written for both `all` and `scenario` runs and aggregates the scenario
+  summaries with `scenario_count` and `failed_scenarios`.
+- `scripts/validate.sh` reads these into `validate-summary.json` and fails the run when they are
+  missing or partial.
+
+## Exit checks
+
+These hold for any scenario added here, fallback or a future Jepsen harness:
+
+- No test treats a new follower start as a no-op publish path.
+- Planner output after every accepted snapshot is deterministically reproducible.
+- Consensus-layer rejection paths are exercised with generated inputs, not only fixed fixtures.

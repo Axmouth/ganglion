@@ -1,5 +1,9 @@
 # Ganglion Detailed Design (implementation-ready)
 
+> Archived 2026-10-29. Phases G1-G3 below are all done. Pending work lives in
+> [PLAN.md](../PLAN.md) and the current public surface in [API.md](../API.md).
+> The fibril paths cited here moved to fibril's `archive/replication-sharding-plan/`.
+
 Companion to `PLAN.md` (which stays compact). This file holds enough detail that the remaining
 work is mostly mechanical. Sections are ordered by execution phase. Each phase lists API shapes,
 semantics, and the tests that gate it. Update this file as phases land; move finished phases into

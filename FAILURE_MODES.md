@@ -2,11 +2,13 @@
 
 Detailed catalogue of failure modes for the ganglion-backed coordination plane, the expected
 behavior, blast radius, recovery procedure, and test status. "Covered" names an existing test or
-scenario; "NEEDED" items are the verification backlog (kept in sync with `DESIGN.md`).
+scenario. "NEEDED" items are the verification backlog. Pending work is tracked in
+[PLAN.md](PLAN.md). The original G1-G3 design is in
+[archive/DESIGN_G1_G3.md](archive/DESIGN_G1_G3.md).
 
-Layering note: raft (openraft 0.8) provides leader election, log replication, and term fencing.
-Ganglion adds durable storage, the committed-snapshot watch, generation CAS, and assignment
-epochs. Fibril consumes snapshots and enforces epochs at the data plane (Stroma/Keratin checks).
+Layering note: raft (vendored openraft 0.9.25) provides leader election, log replication, and
+term fencing. Ganglion adds durable storage, the committed-snapshot watch, generation CAS, and
+assignment epochs. Fibril consumes snapshots and enforces epochs at the data plane (Stroma/Keratin checks).
 A failure is only "handled" when every layer that sees it does the right thing.
 
 ## 1. Process crashes
@@ -64,7 +66,9 @@ A failure is only "handled" when every layer that sees it does the right thing.
 
 ### 2.3 Asymmetric partition (A sees B, B does not see A)
 - Risk: repeated disrupted elections (a node that can send votes but not receive appends keeps
-  campaigning, bumping terms). openraft 0.8 has no pre-vote; term churn is possible.
+  campaigning, bumping terms). openraft 0.9.25 has no pre-vote RPC. Its leader lease makes a
+  voter that still hears a live leader reject vote requests until the lease expires, which
+  limits term churn but does not remove it.
 - Mitigation today: elections are cheap at metadata scale; CAS-guarded controller retries
   absorb leadership churn. Watch consumers see no incorrect state, only delayed updates.
 - NEEDED: chaos-style test (filter one direction in a custom router) asserting liveness
@@ -111,21 +115,21 @@ A failure is only "handled" when every layer that sees it does the right thing.
 ### 4.1 Double initialize / re-initialize on restart
 - Behavior: raft rejects initialize on non-blank state; fibril's composition root logs and
   continues (`coordinator initialize skipped`). Covered by the restart path of the TCP test and
-  cluster-tryout reruns. NEEDED: two nodes both configured `bootstrap=true` with disjoint
-  member sets — document that this CAN create two clusters (operator must designate exactly one
-  bootstrap node; the script does). Detection hint: topology voter sets disagree.
+  cluster-tryout reruns. Two nodes both configured `bootstrap=true` with disjoint member sets
+  CAN create two clusters. The operator must designate exactly one bootstrap node (the script
+  does). Documented in the runbook below. Detection hint: topology voter sets disagree.
 
 ### 4.2 Wrong/changed peer address
 - Addresses live in raft membership; a node restarted on a different address is unreachable
   (membership still holds the old one). Recovery: `change_membership`/`add_learner` flow with
-  the new address, or restart on the pinned address. Documented in survival sheet; NEEDED:
-  runbook section + a `fibrilctl` affordance later.
+  the new address, or restart on the pinned address. Documented in the runbook below.
+  NEEDED: a `fibrilctl` affordance later.
 
 ### 4.3 Raft id reuse with a stale data dir
 - A node restarted with another node's id + old data dir can vote inconsistently with its
   history. openraft's vote/term checks contain most damage, but this is an operator error class
   raft cannot fully defend. Rule: data dir and raft id are a unit; never copy data dirs.
-  NEEDED: prominent runbook warning (cannot be made safe by code).
+  The runbook below carries the warning. It cannot be made safe by code.
 
 ## 4b. Startup and connectivity failures (coordinator cannot connect / find peers)
 
@@ -137,13 +141,14 @@ around it is not what it expects.
   local state without contacting anyone (by design: raft has no "connect phase"). The node then
   campaigns/waits; with no quorum reachable there is no leader, `write_*` fails, and the watch
   serves the last locally-committed snapshot (or empty on first boot).
-- Broker impact (fibril): the broker MUST still serve its data plane. Policy per
-  `REPLICATION_PLANNING.md`: on coordination silence, default to the safe role — standalone
+- Broker impact (fibril): the broker MUST still serve its data plane. Policy per fibril's
+  archived `REPLICATION_PLANNING.md`: on coordination silence, default to the safe role — standalone
   brokers keep the static single-node behavior; clustered brokers treat unknown assignments as
   "not owner" rather than guessing. The provider's watch starting empty expresses exactly this.
 - Detection: `fibrilctl topology` shows `leader=none`; logs show `Unreachable` retries with
-  backoff. NEEDED: a `coordination_healthy` flag in the admin overview (leader known within the
-  last N seconds) so operators and health checks see it without reading raft logs.
+  backoff. DONE (fibril): the topology `raft` block carries `healthy`, from the provider's
+  `coordination_healthy()` (watch forwarder alive and a leader currently known), so operators
+  and health checks see it without reading raft logs.
 - Covered: `lone_node_starts_serves_and_joins_when_peers_arrive` (starts alone, no leader,
   write fails, peers arrive, election proceeds with no restart).
 
@@ -170,10 +175,9 @@ around it is not what it expects.
   peers' listeners) but peers cannot reach IT: it can never become a stable leader target and
   will fall behind on inbound appends... in practice peers' appends fail → the node looks dead
   to the cluster while looking alive locally. Watch keeps serving last-committed state.
-- Detection: peers' topology shows this node's applied index stalling; locally
-  `TcpRaftServer::shutdown`/abort is observable. NEEDED: expose listener liveness on
-  `RaftMetadataNode` (the server handle's `is_finished()`) and include it in the broker health
-  check alongside the forwarder-liveness item (5.4).
+- Detection: peers' topology shows this node's applied index stalling. Locally,
+  `TcpRaftServer::is_serving()` reports whether the accept loop still runs. DONE (fibril): the
+  topology `raft` block carries it as `listener_serving`, next to `healthy` (5.4).
 
 ### 4b.6 Forwarded writes (registration/heartbeat) when there is no leader
 - `client_write_remote` to a non-leader returns `NotLeader` (with a leader hint when known);
@@ -204,9 +208,9 @@ around it is not what it expects.
   lives in fibril's replication phasing.
 
 ### 5.4 Watch forwarder task death (provider internal)
-- If the forwarder panics, fibril-side watch goes stale silently. NEEDED: forwarder should be
-  panic-free by construction (it is: only channel ops), but add a liveness assertion — e.g.
-  provider exposes `forwarder_alive()`; the broker health check includes it.
+- If the forwarder panics, fibril-side watch goes stale silently. The forwarder is panic-free
+  by construction (only channel ops). DONE (fibril): the provider exposes `forwarder_alive()`,
+  and `coordination_healthy()` includes it.
 
 ## 6. Staleness windows (not failures, but must be understood)
 
@@ -229,12 +233,14 @@ around it is not what it expects.
 
 1. DONE: TCP-level partition test (2.1). Asymmetric-partition chaos remains future work (2.3).
 2. DONE: frame-decoder fuzz (2.4).
-3. DONE: storage failure injection — fail-stop + cluster survival (3.1, 3.4).
+3. DONE: storage failure injection, fail-stop + cluster survival (3.1). 3.4 relies on the
+   atomic-write structure and has no injection test yet.
 4. DONE: corrupt snapshot-file startup test + leftover `.tmp` test (1.3, 3.3).
 5. Runbook section below covers double-bootstrap / address change / id reuse (4.1–4.3).
 6. DONE (fibril): provider `forwarder_alive` surface (5.4).
 7. DONE: lone-node startup test (4b.1).
-8. DONE (fibril): `coordination_healthy` in the topology raft block + listener liveness (4b.1, 4b.5).
+8. DONE (fibril): `coordination_healthy` as `healthy` in the topology raft block, plus listener
+   liveness as `listener_serving` (4b.1, 4b.5).
 9. Heartbeat-TTL vs election gaps: policy documented (TTL must exceed worst-case election +
    retry); provider TTL filtering covered by `registration_merges_and_liveness_filters`.
 10. DONE: snapshot-transfer-over-TCP for late joiners
@@ -251,5 +257,6 @@ around it is not what it expects.
 - **Never reuse a raft id with a different/stale data dir** — data dir and raft id are a unit.
 - **Exactly one node bootstraps** (`bootstrap = true`); two bootstrap nodes with disjoint peer
   sets create two clusters. Symptom: topology voter sets disagree across nodes.
-- **No leader for a long time**: check listener liveness (`raft` block in topology shows
-  `healthy:false`), peer reachability/firewalls, and that a quorum of configured peers is up.
+- **No leader for a long time**: check the topology `raft` block (`healthy:false` means no
+  leader is known or the forwarder died, `listener_serving:false` means the listener is down),
+  peer reachability/firewalls, and that a quorum of configured peers is up.

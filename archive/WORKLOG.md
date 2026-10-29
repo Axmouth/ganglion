@@ -5,39 +5,11 @@ Project root: `/home/george/code/ganglion`
 ## Scope
 
 This is the canonical chronological execution log for the repo. It tracks implementation and validation
-work in reverse-briefness order while keeping one live roadmap block.
+work in reverse-briefness order.
 
-## Roadmaps (single source of truth)
-
-### Short-term
-
-1. Finish the first documentation pass: README, examples, surface inventory, current plan, and
-   runbook-oriented failure notes.
-2. Create a generic-extraction inventory for code currently living in Fibril but suitable for
-   Ganglion.
-3. Add missing failure scenarios for asymmetric partitions and leader-on-minority partitions.
-4. Add a consumer-facing example for guarded attributes and resource catalogue writes.
-
-### Medium-term
-
-1. Move domain-free provider logic from Fibril into Ganglion when the boundary is clear.
-2. Replace raft-log heartbeats with leader-local soft liveness if cluster size makes heartbeat
-   commits too noisy.
-3. Add finer-grained assignment commands for large resource sets, instead of full-snapshot writes.
-4. Improve package-level examples and API docs for each crate.
-5. Keep expanding scenario coverage around partitions, restarts, membership mistakes, and disk
-   failures.
-
-### Long-term
-
-1. Stable crate API and versioned snapshot/migration story.
-2. Optional higher-level service wrapper for deployments that want a standalone coordination process.
-3. Operator-oriented strategy and telemetry configuration without binding to a single consumer model.
-4. Additional storage backends where they buy meaningful operational value.
-
-### Worklog maintenance
-
-- When this file gets too long to scan quickly, continue iteration entries in `WORKLOG.2.md` and keep this file as the active segment.
+> Archived 2026-10-29. It covers iterations 0-57. [PLAN.md](../PLAN.md) is the
+> current pending list. The fibril root paths cited below moved to fibril's
+> `archive/` directory.
 
 ## Iteration 0 — Planning and scope alignment
 
