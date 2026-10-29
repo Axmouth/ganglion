@@ -57,6 +57,10 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Fixed
 
+- A coordination listener that cannot bind reports a configuration error that
+  names the listener, with a hint when the port is already in use, instead of a
+  storage error.
+
 - Persistent Raft connections now redial after a remote fatal response, so a
   stopped embedded core cannot trap a peer on its old socket after restart.
   Cancelled or failed requests also discard their socket, preventing a late reply

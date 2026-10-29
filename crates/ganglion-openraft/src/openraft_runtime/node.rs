@@ -183,7 +183,16 @@ impl RaftMetadataNode {
             acceptor,
         )
         .await
-        .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        .map_err(|error| {
+            // A bind failure is about the listen address, not storage.
+            let hint = if error.kind() == std::io::ErrorKind::AddrInUse {
+                ". Another process holds the port. A port inside the operating system's \
+                 ephemeral range can be taken by an outgoing connection while the node is down"
+            } else {
+                ""
+            };
+            OpenraftAdapterError::Config(format!("could not open the coordination listener: {error}{hint}"))
+        })?;
         Ok((node, server))
     }
 }
