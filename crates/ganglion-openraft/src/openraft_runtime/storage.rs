@@ -394,7 +394,9 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                                  command: MetadataRaftCommand|
          -> Option<MetadataRejection> {
             let retirement_attribute = match &command {
-                MetadataRaftCommand::DeregisterResourceReplacingAttribute { value, .. } => Some(value.clone()),
+                MetadataRaftCommand::DeregisterResourceReplacingAttribute { value, .. } => {
+                    Some(value.clone())
+                }
                 _ => None,
             };
             let snapshot = match command {
@@ -411,15 +413,29 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     snapshot
                 }
-                MetadataRaftCommand::UpdatePartitionGuarded { expected_generation, assignment, attributes } => {
+                MetadataRaftCommand::UpdatePartitionGuarded {
+                    expected_generation,
+                    assignment,
+                    attributes,
+                } => {
                     if inner.state.generation != expected_generation {
-                        return Some(MetadataRejection::GenerationMismatch { expected: expected_generation, actual: inner.state.generation });
+                        return Some(MetadataRejection::GenerationMismatch {
+                            expected: expected_generation,
+                            actual: inner.state.generation,
+                        });
                     }
-                    inner.state.assignments.insert(assignment.resource.clone(), assignment);
+                    inner
+                        .state
+                        .assignments
+                        .insert(assignment.resource.clone(), assignment);
                     for (key, value) in attributes {
                         match value {
-                            Some(value) => { inner.state.attributes.insert(key, value); }
-                            None => { inner.state.attributes.remove(&key); }
+                            Some(value) => {
+                                inner.state.attributes.insert(key, value);
+                            }
+                            None => {
+                                inner.state.attributes.remove(&key);
+                            }
                         }
                     }
                     inner.state.generation += 1;
@@ -466,7 +482,11 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
-                MetadataRaftCommand::RegisterResourceWithInitialAttribute { resource, key, value } => {
+                MetadataRaftCommand::RegisterResourceWithInitialAttribute {
+                    resource,
+                    key,
+                    value,
+                } => {
                     if !inner.state.resources.contains(&resource) {
                         if !inner.state.assignments.contains_key(&resource) {
                             inner.state.attributes.insert(key, value);
@@ -484,8 +504,17 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     }
                     return None;
                 }
-                MetadataRaftCommand::DeregisterResourceWithAttribute { resource, key, expected }
-                | MetadataRaftCommand::DeregisterResourceReplacingAttribute { resource, key, expected, .. } => {
+                MetadataRaftCommand::DeregisterResourceWithAttribute {
+                    resource,
+                    key,
+                    expected,
+                }
+                | MetadataRaftCommand::DeregisterResourceReplacingAttribute {
+                    resource,
+                    key,
+                    expected,
+                    ..
+                } => {
                     let actual = inner.state.attributes.get(&key).cloned();
                     if actual != expected {
                         return Some(MetadataRejection::AttributeMismatch { key, actual });
@@ -520,11 +549,15 @@ impl RaftStateMachine<GanglionRaftConfig> for GanglionStateMachine {
                     return None;
                 }
                 MetadataRaftCommand::CompareAndSetAttributeGuarded {
-                    expected_generation, key, expected, value,
+                    expected_generation,
+                    key,
+                    expected,
+                    value,
                 } => {
                     if inner.state.generation != expected_generation {
                         return Some(MetadataRejection::GenerationMismatch {
-                            expected: expected_generation, actual: inner.state.generation,
+                            expected: expected_generation,
+                            actual: inner.state.generation,
                         });
                     }
                     let actual = inner.state.attributes.get(&key).cloned();
@@ -716,14 +749,21 @@ mod tests {
 
     #[test]
     fn resource_initial_attribute_is_atomic_and_survives_snapshot_installation() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let path = std::env::temp_dir().join(format!(
-                "ganglion-incarnation-{}-{}.json", std::process::id(),
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                "ganglion-incarnation-{}-{}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
             ));
             let mut sm = GanglionStateMachine::persistent(&path).unwrap();
-            let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+            let resource =
+                ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
             let mut index = 0;
             let mut entry = |command| {
                 index += 1;
@@ -732,9 +772,12 @@ mod tests {
                     payload: EntryPayload::Normal(command),
                 }]
             };
-            let register = |value: &str| MetadataRaftCommand::RegisterResourceWithInitialAttribute {
-                resource: resource.clone(), key: "incarnation".into(), value: value.into(),
-            };
+            let register =
+                |value: &str| MetadataRaftCommand::RegisterResourceWithInitialAttribute {
+                    resource: resource.clone(),
+                    key: "incarnation".into(),
+                    value: value.into(),
+                };
             // Independently proposed registrations serialize to one origin.
             for value in ["first", "second", "first"] {
                 let replies = sm.apply(entry(register(value))).await.unwrap();
@@ -748,11 +791,16 @@ mod tests {
             let reopened = GanglionStateMachine::persistent(&path).unwrap();
             assert_eq!(reopened.committed_snapshot(), sm.committed_snapshot());
             let mut target = GanglionStateMachine::default();
-            target.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+            target
+                .install_snapshot(&snapshot.meta, snapshot.snapshot)
+                .await
+                .unwrap();
             assert_eq!(target.committed_snapshot(), sm.committed_snapshot());
 
             let delete = |expected: &str| MetadataRaftCommand::DeregisterResourceWithAttribute {
-                resource: resource.clone(), key: "incarnation".into(), expected: Some(expected.into()),
+                resource: resource.clone(),
+                key: "incarnation".into(),
+                expected: Some(expected.into()),
             };
             sm.apply(entry(delete("first"))).await.unwrap();
             let state = sm.committed_snapshot();
@@ -761,7 +809,10 @@ mod tests {
             sm.apply(entry(register("replacement"))).await.unwrap();
             let before = sm.committed_snapshot();
             let replies = sm.apply(entry(delete("first"))).await.unwrap();
-            assert!(!replies[0].accepted, "delayed deletion must not erase a replacement");
+            assert!(
+                !replies[0].accepted,
+                "delayed deletion must not erase a replacement"
+            );
             assert_eq!(sm.committed_snapshot(), before);
             assert_eq!(before.attributes["incarnation"], "replacement");
             std::fs::remove_file(path).unwrap();
@@ -770,29 +821,43 @@ mod tests {
 
     #[test]
     fn resource_initial_attribute_never_labels_existing_or_retiring_resources() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
             for retiring in [false, true] {
                 let mut sm = GanglionStateMachine::default();
-                let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+                let resource =
+                    ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
                 let mut state = CoordinationSnapshot::default();
                 if retiring {
-                    state.assignments.insert(resource.clone(), ganglion_core::PartitionAssignment::new(
-                        resource.clone(), "a", vec![], 1,
-                    ));
+                    state.assignments.insert(
+                        resource.clone(),
+                        ganglion_core::PartitionAssignment::new(resource.clone(), "a", vec![], 1),
+                    );
                 } else {
                     state.resources.insert(resource.clone());
                 }
                 for (index, command) in [
                     MetadataRaftCommand::ApplySnapshot(state),
                     MetadataRaftCommand::RegisterResourceWithInitialAttribute {
-                        resource: resource.clone(), key: "incarnation".into(), value: "invented".into(),
+                        resource: resource.clone(),
+                        key: "incarnation".into(),
+                        value: "invented".into(),
                     },
-                ].into_iter().enumerate() {
+                ]
+                .into_iter()
+                .enumerate()
+                {
                     sm.apply([Entry::<GanglionRaftConfig> {
-                        log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index as u64 + 1),
+                        log_id: LogId::new(
+                            openraft::CommittedLeaderId::new(1, 0),
+                            index as u64 + 1,
+                        ),
                         payload: EntryPayload::Normal(command),
-                    }]).await.unwrap();
+                    }])
+                    .await
+                    .unwrap();
                 }
                 let state = sm.committed_snapshot();
                 assert!(state.resources.contains(&resource));
@@ -803,16 +868,22 @@ mod tests {
 
     #[test]
     fn conditional_retirement_preserves_assignment_and_marker_across_snapshot() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
-            let resource = ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
+            let resource =
+                ganglion_core::ResourceIdentity::new("fibril/queue", "q", 0, None::<String>);
             let mut sm = GanglionStateMachine::default();
             let mut initial = CoordinationSnapshot::default();
             initial.resources.insert(resource.clone());
-            initial.assignments.insert(resource.clone(), ganglion_core::PartitionAssignment::new(
-                resource.clone(), "a", vec![], 1,
-            ));
-            initial.attributes.insert("incarnation".into(), "enrolled".into());
+            initial.assignments.insert(
+                resource.clone(),
+                ganglion_core::PartitionAssignment::new(resource.clone(), "a", vec![], 1),
+            );
+            initial
+                .attributes
+                .insert("incarnation".into(), "enrolled".into());
             let mut index = 0;
             let mut entry = |command| {
                 index += 1;
@@ -821,30 +892,48 @@ mod tests {
                     payload: EntryPayload::Normal(command),
                 }]
             };
-            sm.apply(entry(MetadataRaftCommand::ApplySnapshot(initial))).await.unwrap();
-            let retire = |expected: &str| MetadataRaftCommand::DeregisterResourceReplacingAttribute {
-                resource: resource.clone(), key: "incarnation".into(),
-                expected: Some(expected.into()), value: "retired".into(),
-            };
+            sm.apply(entry(MetadataRaftCommand::ApplySnapshot(initial)))
+                .await
+                .unwrap();
+            let retire =
+                |expected: &str| MetadataRaftCommand::DeregisterResourceReplacingAttribute {
+                    resource: resource.clone(),
+                    key: "incarnation".into(),
+                    expected: Some(expected.into()),
+                    value: "retired".into(),
+                };
             assert!(sm.apply(entry(retire("enrolled"))).await.unwrap()[0].accepted);
             let retired = sm.committed_snapshot();
             assert!(!retired.resources.contains(&resource));
             assert!(retired.assignments.contains_key(&resource));
             assert_eq!(retired.attributes["incarnation"], "retired");
             assert!(sm.apply(entry(retire("retired"))).await.unwrap()[0].accepted);
-            assert_eq!(sm.committed_snapshot(), retired, "retry must not churn generation");
+            assert_eq!(
+                sm.committed_snapshot(),
+                retired,
+                "retry must not churn generation"
+            );
             assert!(!sm.apply(entry(retire("enrolled"))).await.unwrap()[0].accepted);
-            assert_eq!(sm.committed_snapshot(), retired, "stale retirement must not mutate metadata");
+            assert_eq!(
+                sm.committed_snapshot(),
+                retired,
+                "stale retirement must not mutate metadata"
+            );
             let snapshot = sm.build_snapshot().await.unwrap();
             let mut restored = GanglionStateMachine::default();
-            restored.install_snapshot(&snapshot.meta, snapshot.snapshot).await.unwrap();
+            restored
+                .install_snapshot(&snapshot.meta, snapshot.snapshot)
+                .await
+                .unwrap();
             assert_eq!(restored.committed_snapshot(), retired);
         });
     }
 
     #[test]
     fn guarded_attribute_merge_preserves_heartbeats_and_checks_both_guards() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut sm = GanglionStateMachine::default();
             let mut index = 0;
@@ -857,14 +946,24 @@ mod tests {
             };
             let mut node = ganglion_core::NodeInfo::new("a", "endpoint", None::<String>);
             node.labels.insert("heartbeat".into(), "old".into());
-            sm.apply(entry(MetadataRaftCommand::RegisterNode { node: node.clone() })).await.unwrap();
+            sm.apply(entry(MetadataRaftCommand::RegisterNode {
+                node: node.clone(),
+            }))
+            .await
+            .unwrap();
             assert_eq!(sm.committed_snapshot().generation, 1);
             node.labels.insert("heartbeat".into(), "fresh".into());
-            sm.apply(entry(MetadataRaftCommand::RegisterNode { node })).await.unwrap();
+            sm.apply(entry(MetadataRaftCommand::RegisterNode { node }))
+                .await
+                .unwrap();
             assert_eq!(sm.committed_snapshot().generation, 1);
-            let guard = |generation, expected: Option<&str>| MetadataRaftCommand::CompareAndSetAttributeGuarded {
-                expected_generation: generation, key: "history".into(),
-                expected: expected.map(str::to_owned), value: "prepared".into(),
+            let guard = |generation, expected: Option<&str>| {
+                MetadataRaftCommand::CompareAndSetAttributeGuarded {
+                    expected_generation: generation,
+                    key: "history".into(),
+                    expected: expected.map(str::to_owned),
+                    value: "prepared".into(),
+                }
             };
             let replies = sm.apply(entry(guard(1, None))).await.unwrap();
             assert!(replies[0].accepted);
@@ -872,7 +971,11 @@ mod tests {
             assert_eq!(current.nodes["a"].labels["heartbeat"], "fresh");
             assert_eq!(current.generation, 2);
             assert!(sm.apply(entry(guard(2, Some("prepared")))).await.unwrap()[0].accepted);
-            assert_eq!(sm.committed_snapshot(), current, "same-value consensus check must not churn generation");
+            assert_eq!(
+                sm.committed_snapshot(),
+                current,
+                "same-value consensus check must not churn generation"
+            );
             assert!(!sm.apply(entry(guard(1, Some("prepared")))).await.unwrap()[0].accepted);
             assert!(!sm.apply(entry(guard(2, None))).await.unwrap()[0].accepted);
             assert_eq!(sm.committed_snapshot(), current);
@@ -881,36 +984,70 @@ mod tests {
 
     #[test]
     fn guarded_partition_activation_is_atomic_and_preserves_advisory_updates() {
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-            let mut sm = GanglionStateMachine::default();
-            let mut index = 0;
-            let mut entry = |command| { index += 1; [Entry::<GanglionRaftConfig> { log_id:LogId::new(openraft::CommittedLeaderId::new(1,0),index),payload:EntryPayload::Normal(command) }] };
-            let resource=ganglion_core::ResourceIdentity::new("queue","q",0,None::<String>);
-            let old=ganglion_core::PartitionAssignment::new(resource.clone(),"a",vec!["b".into()],1);
-            let new=ganglion_core::PartitionAssignment::new(resource.clone(),"b",vec!["a".into()],2);
-            let mut snapshot=CoordinationSnapshot::default(); snapshot.generation=1;
-            snapshot.assignments.insert(resource.clone(),old.clone());
-            snapshot.attributes.insert("pending".into(),"plan".into());
-            snapshot.attributes.insert("unrelated".into(),"preserve".into());
-            let mut node=ganglion_core::NodeInfo::new("a","addr",None::<String>);
-            snapshot.nodes.insert("a".into(),node.clone());
-            sm.apply(entry(MetadataRaftCommand::ApplySnapshot(snapshot))).await.unwrap();
-            node.labels.insert("heartbeat".into(),"fresh".into());
-            sm.apply(entry(MetadataRaftCommand::RegisterNode {node})).await.unwrap();
-            let command=|expected_generation|MetadataRaftCommand::UpdatePartitionGuarded { expected_generation,assignment:new.clone(),attributes:std::collections::BTreeMap::from([("pending".into(),None),("activation".into(),Some("certificate".into()))]) };
-            assert!(!sm.apply(entry(command(0))).await.unwrap()[0].accepted);
-            assert_eq!(sm.committed_snapshot().assignments[&resource],old);
-            assert_eq!(sm.committed_snapshot().attributes["pending"],"plan");
-            assert!(sm.apply(entry(command(1))).await.unwrap()[0].accepted);
-            let after=sm.committed_snapshot();
-            assert_eq!(after.assignments[&resource],new);
-            assert!(!after.attributes.contains_key("pending"));
-            assert_eq!(after.attributes["activation"],"certificate");
-            assert_eq!(after.attributes["unrelated"],"preserve");
-            assert_eq!(after.nodes["a"].labels["heartbeat"],"fresh");
-            assert!(!sm.apply(entry(command(1))).await.unwrap()[0].accepted);
-            assert_eq!(sm.committed_snapshot(),after);
-        });
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let mut sm = GanglionStateMachine::default();
+                let mut index = 0;
+                let mut entry = |command| {
+                    index += 1;
+                    [Entry::<GanglionRaftConfig> {
+                        log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                        payload: EntryPayload::Normal(command),
+                    }]
+                };
+                let resource =
+                    ganglion_core::ResourceIdentity::new("queue", "q", 0, None::<String>);
+                let old = ganglion_core::PartitionAssignment::new(
+                    resource.clone(),
+                    "a",
+                    vec!["b".into()],
+                    1,
+                );
+                let new = ganglion_core::PartitionAssignment::new(
+                    resource.clone(),
+                    "b",
+                    vec!["a".into()],
+                    2,
+                );
+                let mut snapshot = CoordinationSnapshot::default();
+                snapshot.generation = 1;
+                snapshot.assignments.insert(resource.clone(), old.clone());
+                snapshot.attributes.insert("pending".into(), "plan".into());
+                snapshot
+                    .attributes
+                    .insert("unrelated".into(), "preserve".into());
+                let mut node = ganglion_core::NodeInfo::new("a", "addr", None::<String>);
+                snapshot.nodes.insert("a".into(), node.clone());
+                sm.apply(entry(MetadataRaftCommand::ApplySnapshot(snapshot)))
+                    .await
+                    .unwrap();
+                node.labels.insert("heartbeat".into(), "fresh".into());
+                sm.apply(entry(MetadataRaftCommand::RegisterNode { node }))
+                    .await
+                    .unwrap();
+                let command = |expected_generation| MetadataRaftCommand::UpdatePartitionGuarded {
+                    expected_generation,
+                    assignment: new.clone(),
+                    attributes: std::collections::BTreeMap::from([
+                        ("pending".into(), None),
+                        ("activation".into(), Some("certificate".into())),
+                    ]),
+                };
+                assert!(!sm.apply(entry(command(0))).await.unwrap()[0].accepted);
+                assert_eq!(sm.committed_snapshot().assignments[&resource], old);
+                assert_eq!(sm.committed_snapshot().attributes["pending"], "plan");
+                assert!(sm.apply(entry(command(1))).await.unwrap()[0].accepted);
+                let after = sm.committed_snapshot();
+                assert_eq!(after.assignments[&resource], new);
+                assert!(!after.attributes.contains_key("pending"));
+                assert_eq!(after.attributes["activation"], "certificate");
+                assert_eq!(after.attributes["unrelated"], "preserve");
+                assert_eq!(after.nodes["a"].labels["heartbeat"], "fresh");
+                assert!(!sm.apply(entry(command(1))).await.unwrap()[0].accepted);
+                assert_eq!(sm.committed_snapshot(), after);
+            });
     }
 
     #[test]

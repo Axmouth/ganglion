@@ -165,14 +165,8 @@ impl RaftMetadataNode {
         let log_telemetry = log_store.telemetry_handle();
         let network = super::DialerNetworkFactory::with_dialer_format(dialer, wire_format);
         let peer_health = network.health.clone();
-        let mut node = Self::start_with_network(
-            id,
-            config,
-            network,
-            log_store,
-            state_machine,
-        )
-        .await?;
+        let mut node =
+            Self::start_with_network(id, config, network, log_store, state_machine).await?;
         node.log_telemetry = Some(log_telemetry);
         node.peer_health = peer_health;
 
@@ -191,7 +185,9 @@ impl RaftMetadataNode {
             } else {
                 ""
             };
-            OpenraftAdapterError::Config(format!("could not open the coordination listener: {error}{hint}"))
+            OpenraftAdapterError::Config(format!(
+                "could not open the coordination listener: {error}{hint}"
+            ))
         })?;
         Ok((node, server))
     }
@@ -490,9 +486,10 @@ impl RaftMetadataNode {
 
     /// Explicit local transport failures. A successful RPC clears its peer's
     /// observation; in-process transports expose an empty view.
-    pub fn peer_transport_failures(&self) -> tokio::sync::watch::Receiver<
-        std::collections::BTreeMap<u64, super::PeerTransportFailure>,
-    > {
+    pub fn peer_transport_failures(
+        &self,
+    ) -> tokio::sync::watch::Receiver<std::collections::BTreeMap<u64, super::PeerTransportFailure>>
+    {
         self.peer_health.subscribe()
     }
 

@@ -1258,11 +1258,17 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(index, server)| {
-                    (index as u64 + 1, BasicNode::new(server.local_addr().to_string()))
+                    (
+                        index as u64 + 1,
+                        BasicNode::new(server.local_addr().to_string()),
+                    )
                 })
                 .collect();
             nodes[0].initialize(members).await.expect("initialize");
-            let first = nodes[0].wait_for_any_leader(timeout).await.expect("election");
+            let first = nodes[0]
+                .wait_for_any_leader(timeout)
+                .await
+                .expect("election");
             let watcher = (0..3).find(|i| *i as u64 + 1 != first).expect("a follower");
             let mut leader = nodes[watcher].watch_leader();
             tokio::time::timeout(timeout, leader.wait_for(|l| *l == Some(first)))
@@ -1273,11 +1279,12 @@ mod tests {
             let index = (first - 1) as usize;
             servers[index].shutdown();
             nodes[index].shutdown().await.expect("leader shutdown");
-            let next = tokio::time::timeout(timeout, leader.wait_for(|l| l.is_some_and(|l| l != first)))
-                .await
-                .expect("watch sees a new leader")
-                .expect("watch open")
-                .expect("leader present");
+            let next =
+                tokio::time::timeout(timeout, leader.wait_for(|l| l.is_some_and(|l| l != first)))
+                    .await
+                    .expect("watch sees a new leader")
+                    .expect("watch open")
+                    .expect("leader present");
             assert_ne!(next, first);
             for (i, node) in nodes.iter().enumerate() {
                 if i != index {

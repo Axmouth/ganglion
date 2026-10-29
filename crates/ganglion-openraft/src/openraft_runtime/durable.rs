@@ -196,7 +196,10 @@ impl WalWriter {
     }
 
     fn submit(&self, job: WalJob) {
-        let tx = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tx = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Err(std::sync::mpsc::SendError(job)) = tx.send(job) {
             let error = || std::io::Error::other("raft WAL writer stopped");
             match job {
@@ -220,7 +223,10 @@ impl WalWriter {
     async fn replace(&self, file: File) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let sent = {
-            let sender = self.tx.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let sender = self
+                .tx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             sender.send(WalJob::Replace { file, done: tx }).is_ok()
         };
         if sent {
@@ -230,7 +236,8 @@ impl WalWriter {
 }
 
 fn encode_record(record: &WalRecord) -> Result<Vec<u8>, StorageError<NodeId>> {
-    let mut line = serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
+    let mut line =
+        serde_json::to_vec(record).map_err(|error| StorageIOError::write_logs(&error))?;
     line.push(b'\n');
     Ok(line)
 }
