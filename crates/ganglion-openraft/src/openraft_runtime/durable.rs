@@ -82,8 +82,9 @@ pub struct FileRaftLogStore {
     inner: Arc<Mutex<DurableInner>>,
     wal: Arc<WalWriter>,
     telemetry: Arc<StorageTelemetry>,
-    /// Test-only failure injection (FAILURE_MODES §3.1): when set, write paths
-    /// fail like a dying disk so fail-stop behavior can be asserted.
+    /// Test-only failure injection (FAILURE_MODES §3.1, §3.4): when set,
+    /// appends, votes and the compaction tmp write fail like a full or dying
+    /// disk so fail-stop and atomic-rewrite behavior can be asserted.
     fail_writes: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -298,7 +299,7 @@ impl FileRaftLogStore {
             std::sync::atomic::Ordering::Relaxed,
         );
         if needs_compaction {
-            file = Self::rewrite(&path, &state, &telemetry)?;
+            file = Self::rewrite(&path, &state, &telemetry, false)?;
         }
         let wal = WalWriter::start(file, Arc::clone(&telemetry))
             .map_err(|error| StorageIOError::write_logs(&error))?;
@@ -337,11 +338,13 @@ impl FileRaftLogStore {
     }
 
     /// Rewrite the WAL compacted to `state` and return the reopened file. The
-    /// writer must have no write in flight.
+    /// writer must have no write in flight. `inject_failure` fails the tmp
+    /// write before the rename, as a full disk would.
     fn rewrite(
         path: &std::path::Path,
         state: &DurableState,
         telemetry: &StorageTelemetry,
+        inject_failure: bool,
     ) -> Result<File, StorageError<NodeId>> {
         let tmp_path = path.with_extension("tmp");
         let mut tmp =
@@ -361,6 +364,12 @@ impl FileRaftLogStore {
         }
         for entry in state.log.values() {
             write_line(&WalRecord::Entry(entry.clone()))?;
+        }
+        if inject_failure {
+            return Err(StorageIOError::write_logs(&std::io::Error::other(
+                "injected write failure",
+            ))
+            .into());
         }
         tmp.sync_data()
             .map_err(|error| StorageIOError::write_logs(&error))?;
@@ -557,9 +566,12 @@ impl RaftLogStorage<GanglionRaftConfig> for FileRaftLogStore {
             .map_err(|error| StorageIOError::write_logs(&error))?;
         let path = self.path.clone();
         let telemetry = Arc::clone(&self.telemetry);
-        let file = tokio::task::spawn_blocking(move || Self::rewrite(&path, &state, &telemetry))
-            .await
-            .map_err(|error| StorageIOError::write_logs(&std::io::Error::other(error)))??;
+        let inject_failure = self.check_injected_failure().is_err();
+        let file = tokio::task::spawn_blocking(move || {
+            Self::rewrite(&path, &state, &telemetry, inject_failure)
+        })
+        .await
+        .map_err(|error| StorageIOError::write_logs(&std::io::Error::other(error)))??;
         self.wal.replace(file).await;
         Ok(())
     }
@@ -665,6 +677,80 @@ mod tests {
                 .expect("entries readable");
             let indexes: Vec<u64> = entries.iter().map(|entry| entry.log_id.index).collect();
             assert_eq!(indexes, vec![3, 4]);
+        });
+    }
+
+    /// FAILURE_MODES §3.4: a failed compaction tmp write surfaces the error,
+    /// leaves the original WAL byte-identical and replayable, and the next
+    /// purge compacts normally.
+    #[test]
+    fn file_store_compaction_failure_keeps_original_wal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            use super::super::MetadataRaftCommand;
+            use ganglion_core::CoordinationSnapshot;
+            use openraft::{CommittedLeaderId, EntryPayload};
+
+            let path = unique_wal_path("compaction-failure");
+            let leader = CommittedLeaderId::new(1, 0);
+            let make_entry = |index: u64| Entry::<GanglionRaftConfig> {
+                log_id: LogId::new(leader, index),
+                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(
+                    CoordinationSnapshot {
+                        generation: index,
+                        ..CoordinationSnapshot::default()
+                    },
+                )),
+            };
+            let indexes = |entries: Vec<Entry<GanglionRaftConfig>>| -> Vec<u64> {
+                entries.iter().map(|entry| entry.log_id.index).collect()
+            };
+
+            {
+                let mut store = FileRaftLogStore::open(&path).expect("open fresh");
+                store.save_vote(&Vote::new(1, 7)).await.expect("vote");
+                store
+                    .append_entries((1..=5).map(make_entry))
+                    .await
+                    .expect("append");
+                let original = std::fs::read(&path).expect("read WAL");
+
+                store.inject_write_failure(true);
+                assert!(
+                    store.purge(LogId::new(leader, 2)).await.is_err(),
+                    "compaction failure must surface"
+                );
+                assert_eq!(std::fs::read(&path).expect("read WAL"), original);
+                assert_eq!(store.telemetry().compactions, 0);
+                {
+                    let mut replayed = FileRaftLogStore::open(&path).expect("replay");
+                    let entries = replayed.try_get_log_entries(..).await.expect("entries");
+                    assert_eq!(indexes(entries), vec![1, 2, 3, 4, 5]);
+                }
+
+                store.inject_write_failure(false);
+                store
+                    .purge(LogId::new(leader, 2))
+                    .await
+                    .expect("retried purge should compact");
+                assert_eq!(store.telemetry().compactions, 1);
+                store
+                    .append_entries([make_entry(6)])
+                    .await
+                    .expect("append after compaction");
+            }
+
+            let mut reopened = FileRaftLogStore::open(&path).expect("reopen");
+            assert_eq!(
+                reopened.read_vote().await.expect("read vote"),
+                Some(Vote::new(1, 7))
+            );
+            let log_state = reopened.get_log_state().await.expect("log state");
+            assert_eq!(log_state.last_purged_log_id, Some(LogId::new(leader, 2)));
+            let entries = reopened.try_get_log_entries(..).await.expect("entries");
+            assert_eq!(indexes(entries), vec![3, 4, 5, 6]);
         });
     }
 

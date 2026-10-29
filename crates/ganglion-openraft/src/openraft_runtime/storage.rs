@@ -163,6 +163,9 @@ pub struct GanglionStateMachine {
     committed_tx: Arc<watch::Sender<CoordinationSnapshot>>,
     snapshot_path: Option<Arc<std::path::PathBuf>>,
     telemetry: Arc<StorageTelemetry>,
+    /// Test-only failure injection (FAILURE_MODES §3.4): when set, the
+    /// snapshot tmp write fails before the rename, as a full disk would.
+    fail_snapshot_writes: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for GanglionStateMachine {
@@ -173,6 +176,7 @@ impl Default for GanglionStateMachine {
             committed_tx: Arc::new(committed_tx),
             snapshot_path: None,
             telemetry: Arc::default(),
+            fail_snapshot_writes: Arc::default(),
         }
     }
 }
@@ -245,6 +249,13 @@ impl GanglionStateMachine {
         self.telemetry.snapshot()
     }
 
+    /// Make snapshot persists fail like a full disk (test hook).
+    #[doc(hidden)]
+    pub fn inject_write_failure(&self, fail: bool) {
+        self.fail_snapshot_writes
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Atomically write the snapshot file: tmp + fsync + rename + parent-dir
     /// fsync, so a crash leaves either the old or the new snapshot — never a
     /// torn one — and the rename itself is durable.
@@ -260,6 +271,12 @@ impl GanglionStateMachine {
             use std::io::Write as _;
             let mut file = std::fs::File::create(&tmp_path)?;
             file.write_all(&bytes)?;
+            if self
+                .fail_snapshot_writes
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(std::io::Error::other("injected write failure"));
+            }
             file.sync_data()?;
             drop(file);
             std::fs::rename(&tmp_path, path.as_ref())?;
@@ -1447,6 +1464,78 @@ mod tests {
 
             let reloaded = GanglionStateMachine::persistent(&path).expect("reload");
             assert_eq!(reloaded.committed_snapshot().generation, 1);
+        });
+    }
+
+    /// FAILURE_MODES §3.4: a failed snapshot tmp write surfaces the error and
+    /// keeps the previous snapshot file, and the next persist succeeds.
+    #[test]
+    fn persistent_state_machine_persist_failure_keeps_previous_snapshot() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let path = std::env::temp_dir().join(format!(
+                "ganglion-snap-persist-failure-{}-{:?}.json",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let entry = |index: u64, generation: u64| Entry::<GanglionRaftConfig> {
+                log_id: LogId::new(openraft::CommittedLeaderId::new(1, 0), index),
+                payload: EntryPayload::Normal(MetadataRaftCommand::ApplySnapshot(
+                    CoordinationSnapshot {
+                        generation,
+                        ..CoordinationSnapshot::default()
+                    },
+                )),
+            };
+
+            let mut sm = GanglionStateMachine::persistent(&path).expect("open");
+            sm.apply(vec![entry(1, 1)]).await.expect("apply");
+            sm.build_snapshot().await.expect("first persist");
+            let original = std::fs::read(&path).expect("read snapshot");
+
+            sm.apply(vec![entry(2, 2)]).await.expect("apply");
+            sm.inject_write_failure(true);
+            assert!(
+                sm.build_snapshot().await.is_err(),
+                "snapshot build persist failure must surface"
+            );
+            let meta = SnapshotMeta {
+                last_log_id: Some(LogId::new(openraft::CommittedLeaderId::new(1, 0), 3)),
+                last_membership: StoredMembership::default(),
+                snapshot_id: "installed".into(),
+            };
+            let data = serde_json::to_vec(&CoordinationSnapshot {
+                generation: 3,
+                ..CoordinationSnapshot::default()
+            })
+            .expect("encode");
+            assert!(
+                sm.install_snapshot(&meta, Box::new(Cursor::new(data.clone())))
+                    .await
+                    .is_err(),
+                "snapshot install persist failure must surface"
+            );
+            assert_eq!(std::fs::read(&path).expect("read snapshot"), original);
+            assert_eq!(sm.committed_snapshot().generation, 2);
+            assert_eq!(sm.telemetry().snapshot_persists, 1);
+            let reloaded = GanglionStateMachine::persistent(&path).expect("reload");
+            assert_eq!(reloaded.committed_snapshot().generation, 1);
+
+            sm.inject_write_failure(false);
+            sm.build_snapshot().await.expect("retried build persist");
+            let reloaded = GanglionStateMachine::persistent(&path).expect("reload");
+            assert_eq!(reloaded.committed_snapshot().generation, 2);
+            sm.install_snapshot(&meta, Box::new(Cursor::new(data)))
+                .await
+                .expect("retried install persist");
+            let reloaded = GanglionStateMachine::persistent(&path).expect("reload");
+            assert_eq!(reloaded.committed_snapshot().generation, 3);
+            assert_eq!(sm.telemetry().snapshot_persists, 3);
         });
     }
 

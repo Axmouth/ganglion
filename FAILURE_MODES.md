@@ -106,9 +106,17 @@ A failure is only "handled" when every layer that sees it does the right thing.
 
 ### 3.4 Disk-full during WAL compaction / snapshot persist
 - tmp-file write fails → error propagates, original file untouched (rename never happens).
-  Compaction failure leaves a larger-but-valid WAL; snapshot-persist failure keeps the previous
-  snapshot. Both retry on the next trigger.
-- NEEDED: covered implicitly by atomic-write structure; add to the failure-injection test of 3.1.
+  Compaction failure leaves a larger-but-valid WAL; snapshot-persist failure (build or install)
+  keeps the previous snapshot and the in-memory state.
+- Retry: openraft treats a failed purge or snapshot build/install as a fatal storage error, so
+  a running node fail-stops as in 3.1 rather than retrying in place. After a restart the node
+  replays the previous snapshot plus the unpurged WAL tail, `FileRaftLogStore::open` compacts
+  again when dead records pile up, and the next snapshot trigger persists normally. At the
+  storage layer the next purge or persist after the disk recovers succeeds.
+- DONE: `file_store_compaction_failure_keeps_original_wal` and
+  `persistent_state_machine_persist_failure_keeps_previous_snapshot` inject a tmp-write
+  failure, assert the error, byte-identical original files and unchanged reload state, then
+  clear the injection and assert the retry succeeds and reloads after reopen.
 
 ## 4. Bootstrap and membership mistakes (operator errors)
 
@@ -236,8 +244,8 @@ around it is not what it expects.
 
 1. DONE: TCP-level partition test (2.1). Asymmetric-partition chaos remains future work (2.3).
 2. DONE: frame-decoder fuzz (2.4).
-3. DONE: storage failure injection, fail-stop + cluster survival (3.1). 3.4 relies on the
-   atomic-write structure and has no injection test yet.
+3. DONE: storage failure injection, fail-stop + cluster survival (3.1), and tmp-write failure
+   during WAL compaction and snapshot persist (3.4).
 4. DONE: corrupt snapshot-file startup test + leftover `.tmp` test (1.3, 3.3).
 5. Runbook section below covers double-bootstrap / address change / id reuse (4.1–4.3).
 6. DONE (fibril): provider `forwarder_alive` surface (5.4).

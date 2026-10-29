@@ -11,6 +11,10 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Added
 
+- `GanglionStateMachine::inject_write_failure` test hook, and
+  `FileRaftLogStore::inject_write_failure` also fails the compaction tmp write,
+  so disk-full during WAL compaction and snapshot persist can be tested.
+
 - A node with empty raft membership that was not asked to initialize the
   cluster logs a warning 10 s after start and every 30 s after that, until the
   bootstrap node brings it into the cluster.
