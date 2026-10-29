@@ -10,11 +10,6 @@ echo " - stale term proposals remain rejected after restart"
 echo " - restart failover ordering enforces higher-term leadership sequencing"
 echo " - log reset behavior is correct on term bump"
 
-if command -v clojure >/dev/null 2>&1; then
-  echo "clojure present; running planned jepsen checks"
-  echo "TODO: integrate ganglion/jepsen persistence harness invocation"
-fi
-
 echo "INFO: running focused rust persistence parity checks (jepsen harness not yet wired)"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 

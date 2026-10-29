@@ -57,6 +57,10 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Fixed
 
+- Jepsen scenarios 01-05 always run their Rust smoke checks. With `clojure` on
+  `PATH` they used to print a placeholder and report a pass without checking
+  anything.
+
 - A coordination listener that cannot bind reports a configuration error that
   names the listener, with a hint when the port is already in use, instead of a
   storage error.

@@ -11,11 +11,6 @@ echo " - partitioned follower rejoins and converges on committed state"
 echo " - durable node restart recovers committed state from the WAL"
 echo " - learner join/catch-up/promotion and voter removal flows work"
 
-if command -v clojure >/dev/null 2>&1; then
-  echo "clojure present; running planned jepsen checks"
-  echo "TODO: integrate ganglion/jepsen raft-runtime harness invocation"
-fi
-
 echo "INFO: running focused openraft runtime checks (jepsen harness not yet wired)"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 

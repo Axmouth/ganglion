@@ -39,10 +39,8 @@ Environment variable:
 - `GANGLION_PERSISTED_REPLAY_PROFILE` (resolved default is `default`).
 
 No Jepsen/Clojure harness is wired yet. Every scenario runs a fallback set of
-focused Rust tests (see the inventory below). When `clojure` is on `PATH`,
-scenarios 01-05 print a placeholder and exit without running checks, while 06-08
-always run their Rust checks. Either way each scenario writes a log file so
-orchestration can continue.
+focused Rust tests (see the inventory below), whether or not `clojure` is on
+`PATH`, and writes a log file so orchestration can continue.
 
 `validate-summary.json` also includes `startup_smoke` with `requested` and `result` fields (`pass`/`skipped`/`fail` behavior), aligned with other run phases.
 

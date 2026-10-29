@@ -7,13 +7,7 @@ echo " - only one active leader's writes persist per generation"
 echo " - no conflicting accepted generation values"
 echo " - follower-safe convergence after heal"
 
-if command -v clojure >/dev/null 2>&1; then
-  echo "clojure present; running planned jepsen checks"
-  echo "TODO: integrate ganglion/jepsen harness invocation"
-  exit 0
-fi
-
-echo "INFO: clojure runtime missing; running local smoke invariants"
+echo "INFO: no Jepsen harness is wired, running local Rust smoke checks"
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 cargo test -p ganglion-openraft fuzz_control_loop_publishing_and_rejection_matrix --quiet
 cargo test -p ganglion-openraft control_loop_does_not_publish_on_consensus_reject --quiet
