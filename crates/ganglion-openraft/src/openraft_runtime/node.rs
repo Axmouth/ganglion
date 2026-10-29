@@ -6,6 +6,7 @@
 //! the in-memory/persisted nodes until a bridging decision is made.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -63,6 +64,76 @@ pub struct RaftMetadataNode {
     state_machine: GanglionStateMachine,
     log_telemetry: Option<Arc<super::StorageTelemetry>>,
     peer_health: super::peer_health::PeerHealth,
+    initialize_called: Arc<AtomicBool>,
+    _bootstrap_wait_log: AbortOnDrop,
+}
+
+/// First bootstrap-wait warning comes after this delay, so a bootstrap node
+/// that initializes right after start never logs it.
+const BOOTSTRAP_WAIT_FIRST_WARNING: Duration = Duration::from_secs(10);
+const BOOTSTRAP_WAIT_WARNING_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Aborts a background task when the owning node is dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// A node is waiting for the bootstrap node when it is running, holds no
+/// membership and was never asked to initialize the cluster itself.
+fn awaiting_bootstrap(
+    metrics: &openraft::RaftMetrics<NodeId, BasicNode>,
+    initialize_called: bool,
+) -> bool {
+    !initialize_called && metrics.running_state.is_ok() && membership_is_empty(metrics)
+}
+
+fn membership_is_empty(metrics: &openraft::RaftMetrics<NodeId, BasicNode>) -> bool {
+    metrics
+        .membership_config
+        .membership()
+        .nodes()
+        .next()
+        .is_none()
+}
+
+/// Non-bootstrap nodes on first boot otherwise wait without a word, so warn
+/// periodically until membership arrives or raft stops.
+async fn log_while_awaiting_bootstrap(
+    id: NodeId,
+    mut metrics: tokio::sync::watch::Receiver<openraft::RaftMetrics<NodeId, BasicNode>>,
+    initialize_called: Arc<AtomicBool>,
+) {
+    let started = tokio::time::Instant::now();
+    let mut next_warning = started + BOOTSTRAP_WAIT_FIRST_WARNING;
+    loop {
+        {
+            let current = metrics.borrow_and_update();
+            if current.running_state.is_err() || !membership_is_empty(&current) {
+                return;
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(next_warning) => {
+                if awaiting_bootstrap(&metrics.borrow(), initialize_called.load(Ordering::Relaxed)) {
+                    tracing::warn!(
+                        node_id = id,
+                        waited_secs = started.elapsed().as_secs(),
+                        "raft membership is empty, waiting for the bootstrap node to initialize the cluster"
+                    );
+                }
+                next_warning += BOOTSTRAP_WAIT_WARNING_INTERVAL;
+            }
+            changed = metrics.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl RaftMetadataNode {
@@ -259,12 +330,20 @@ impl RaftMetadataNode {
         let raft = Raft::new(id, config, network, log_store, state_machine.clone())
             .await
             .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+        let initialize_called = Arc::new(AtomicBool::new(false));
+        let bootstrap_wait_log = AbortOnDrop(tokio::spawn(log_while_awaiting_bootstrap(
+            id,
+            raft.metrics(),
+            initialize_called.clone(),
+        )));
         Ok(Self {
             id,
             raft,
             state_machine,
             log_telemetry: None,
             peer_health: Default::default(),
+            initialize_called,
+            _bootstrap_wait_log: bootstrap_wait_log,
         })
     }
 
@@ -273,6 +352,7 @@ impl RaftMetadataNode {
         &self,
         members: BTreeMap<NodeId, BasicNode>,
     ) -> Result<(), OpenraftAdapterError> {
+        self.initialize_called.store(true, Ordering::Relaxed);
         self.raft
             .initialize(members)
             .await
@@ -727,6 +807,45 @@ mod tests {
             .await
             .expect("cluster should initialize");
         nodes
+    }
+
+    #[test]
+    fn blank_node_awaits_bootstrap_until_initialized() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        rt.block_on(async {
+            let router = InProcessRouter::new();
+            let node = RaftMetadataNode::start(1, test_config(), &router)
+                .await
+                .expect("node should start");
+
+            let initialize_called = || node.initialize_called.load(Ordering::Relaxed);
+            assert!(!initialize_called());
+            assert!(awaiting_bootstrap(&node.raft.metrics().borrow(), false));
+            // The bootstrap node itself never warns, even before membership lands.
+            assert!(!awaiting_bootstrap(&node.raft.metrics().borrow(), true));
+
+            node.initialize(basic_members(&[1]))
+                .await
+                .expect("cluster should initialize");
+            assert!(initialize_called());
+
+            let mut metrics = node.raft.metrics();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while membership_is_empty(&metrics.borrow_and_update()) {
+                    metrics.changed().await.expect("metrics should stay open");
+                }
+            })
+            .await
+            .expect("membership should land after initialize");
+            assert!(!awaiting_bootstrap(&metrics.borrow(), false));
+
+            node.shutdown().await.expect("shutdown");
+        });
     }
 
     #[test]

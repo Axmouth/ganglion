@@ -14,6 +14,7 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 serde = { version = "1", optional = true, features = ["derive"] }
 serde_json = { version = "1", optional = true }
 rmp-serde = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 ganglion-coordination = { path = "../ganglion-coordination", version = "0.1.0" }
@@ -21,7 +22,7 @@ proptest = "1"
 
 [features]
 default = []
-openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json", "dep:rmp-serde"]
+openraft = ["dep:openraft", "dep:tokio", "dep:serde", "dep:serde_json", "dep:rmp-serde", "dep:tracing"]
 
 [[example]]
 name = "cluster_demo"

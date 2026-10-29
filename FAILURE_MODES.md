@@ -160,8 +160,11 @@ around it is not what it expects.
 ### 4b.3 Bootstrap node absent on first boot
 - Non-bootstrap nodes start blank and wait: they never self-initialize (only `bootstrap = true`
   initializes, exactly once). The cluster forms only when the bootstrap node arrives. This is
-  safe-by-default but silent. Detection: every node reports `leader=none`, `voters=[]`.
-  NEEDED: log a periodic, explicit "membership empty — waiting for bootstrap" line.
+  safe-by-default. Detection: every node reports `leader=none`, `voters=[]`.
+- DONE: a node that holds no membership and was never asked to initialize logs a warning
+  ("raft membership is empty, waiting for the bootstrap node to initialize the cluster", with
+  `node_id` and `waited_secs`) 10 s after start and every 30 s after that, until membership
+  arrives. Covered: `blank_node_awaits_bootstrap_until_initialized`.
 
 ### 4b.4 Bootstrap succeeds but peer list is wrong (typo'd address, wrong port)
 - The cluster commits membership containing a bad address; that member never joins; the
@@ -245,6 +248,7 @@ around it is not what it expects.
    retry); provider TTL filtering covered by `registration_merges_and_liveness_filters`.
 10. DONE: snapshot-transfer-over-TCP for late joiners
    (`late_joiner_catches_up_via_snapshot_transfer_over_tcp`).
+11. DONE: periodic bootstrap-wait warning on blank non-bootstrap nodes (4b.3).
 
 ## Operator runbook (quick reference)
 

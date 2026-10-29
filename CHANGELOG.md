@@ -11,6 +11,10 @@ tagged releases yet. Earlier history predates this changelog.
 
 ### Added
 
+- A node with empty raft membership that was not asked to initialize the
+  cluster logs a warning 10 s after start and every 30 s after that, until the
+  bootstrap node brings it into the cluster.
+
 - `RaftMetadataNode::watch_leader` reports this node's view of the current
   leader and wakes only when it changes.
 
