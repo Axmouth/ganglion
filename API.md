@@ -158,7 +158,7 @@ Everything listed outside those tables is implemented.
 
 ### Openraft runtime (feature `openraft`)
 
-Runs on the vendored openraft 0.9.25. The `openraft` crate is re-exported so consumers can name
+Runs on openraft 0.9.25 from crates.io. The `openraft` crate is re-exported so consumers can name
 `BasicNode`, `Config` and storage traits without their own version-matched dependency.
 
 - `GanglionRaftConfig`

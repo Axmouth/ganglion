@@ -5,6 +5,6 @@
   topology introspection, and the cluster playground, all done
 - [Worklog, iterations 0-57](WORKLOG.md)
 
-The current adapter uses vendored OpenRaft 0.9.25. Current contracts are in
+The current adapter uses OpenRaft 0.9.25 from crates.io. Current contracts are in
 [API.md](../API.md).
 Pending work remains in [PLAN.md](../PLAN.md).

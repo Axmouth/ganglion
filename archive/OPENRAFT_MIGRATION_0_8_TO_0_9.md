@@ -3,8 +3,8 @@
 Historical scope: migrating `ganglion-openraft` off the **0.8.9** line. The migration target recorded
 by this plan is **0.9.24**. Its **0.10** notes describe the alpha API assessed when
 the plan was written. Recheck upstream releases and migration guidance before
-starting a future upgrade. The current adapter uses the vendored OpenRaft
-0.9.25 tree, so the 0.8-to-0.9 migration checklist is completed historical
+starting a future upgrade. The current adapter uses OpenRaft
+0.9.25 from crates.io, so the 0.8-to-0.9 migration checklist is completed historical
 material. Remaining public API cleanup is tracked in [PLAN.md](../PLAN.md).
 
 This is not a generic openraft guide. It maps openraft's documented API changes

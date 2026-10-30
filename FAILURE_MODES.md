@@ -6,7 +6,7 @@ scenario. "NEEDED" items are the verification backlog. Pending work is tracked i
 [PLAN.md](PLAN.md). The original G1-G3 design is in
 [archive/DESIGN_G1_G3.md](archive/DESIGN_G1_G3.md).
 
-Layering note: raft (vendored openraft 0.9.25) provides leader election, log replication, and
+Layering note: raft (openraft 0.9.25) provides leader election, log replication, and
 term fencing. Ganglion adds durable storage, the committed-snapshot watch, generation CAS, and
 assignment epochs. Fibril consumes snapshots and enforces epochs at the data plane (Stroma/Keratin checks).
 A failure is only "handled" when every layer that sees it does the right thing.

@@ -50,10 +50,6 @@ tagged releases yet. Earlier history predates this changelog.
   wait for their sync without blocking a worker, appends queued together share
   one sync, and a failed write fails every later one.
 
-- The vendored OpenRaft logs vote and replication RPCs that fail with
-  `Unreachable` at warn instead of error. A stopped peer is routine during
-  failover. Timeouts and other RPC errors still log at error.
-
 - Explicit Raft RPC disconnects are verified by one immediate retry with a 200 ms
   deadline. A successful exchange clears suspicion; failed/cancelled exchanges
   discard their socket so late replies cannot leak into another request.
@@ -79,13 +75,10 @@ tagged releases yet. Earlier history predates this changelog.
   from being read as the next request's response. Deterministic transport tests
   cover both cases.
 
-- Replication no longer panics on an empty log read. A pinned OpenRaft 0.9.25
-  source copy retries the original request without acknowledging unread entries,
-  correcting both the 0.9.24 unwrap and the 0.9.25 index-zero heartbeat fallback.
-  A subprocess regression catches background panics, verifies catch-up after
-  transient empty reads, and verifies old streams stop on step-down during
-  persistent retries. See
-  `vendor/openraft/PATCHES.md` for provenance and upstream replacement conditions.
+- Replication no longer panics on an empty log read in release builds. OpenRaft
+  0.9.25 from crates.io turns such a read into a retry where 0.9.24 panicked.
+  Debug builds still stop on an OpenRaft assertion there, since an empty read
+  for a non-empty range breaks the log reader contract.
 
 - Poisoned locks in the openraft adapters are recovered instead of panicking,
   so one panicked holder cannot wedge the coordination layer.

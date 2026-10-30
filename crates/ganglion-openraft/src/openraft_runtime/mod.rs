@@ -19,8 +19,6 @@ mod peer_health;
 mod storage;
 mod tcp;
 pub use peer_health::PeerTransportFailure;
-#[cfg(test)]
-mod replication_regression;
 
 /// Re-export of the underlying raft crate so consumers can name trait bounds
 /// (`openraft::storage::RaftLogStorage`), `BasicNode`, `Config`, etc. without
