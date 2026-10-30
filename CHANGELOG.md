@@ -78,7 +78,10 @@ tagged releases yet. Earlier history predates this changelog.
 - Replication no longer panics on an empty log read in release builds. OpenRaft
   0.9.25 from crates.io turns such a read into a retry where 0.9.24 panicked.
   Debug builds still stop on an OpenRaft assertion there, since an empty read
-  for a non-empty range breaks the log reader contract.
+  for a non-empty range breaks the log reader contract. One cause is confirmed:
+  a leader that steps down and truncates conflicting entries can leave an old
+  replication stream reading the truncated range. On 0.9.25 that read's report
+  belongs to a retired session and is dropped, and a test reproduces it.
 
 - Poisoned locks in the openraft adapters are recovered instead of panicking,
   so one panicked holder cannot wedge the coordination layer.
