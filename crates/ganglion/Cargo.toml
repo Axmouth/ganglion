@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Reusable, domain-free cluster coordination engine (raft-backed)."
 license = "MIT"
-repository = "https://github.com/Axmouth/ganglion"
+repository = "https://github.com/Organically-Distributed/ganglion"
 
 # Umbrella crate: the stable Ganglion surface that depending crates bind to,
 # so they import `ganglion` instead of reaching into backend crates like

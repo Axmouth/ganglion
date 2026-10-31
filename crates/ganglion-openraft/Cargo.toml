@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "openraft-backed consensus for the ganglion cluster coordination engine."
 license = "MIT"
-repository = "https://github.com/Axmouth/ganglion"
+repository = "https://github.com/Organically-Distributed/ganglion"
 
 [dependencies]
 ganglion-core = { path = "../ganglion-core", version = "0.1.0" }

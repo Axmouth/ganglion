@@ -24,7 +24,7 @@ The integration exposes these shared control-plane capabilities:
 5. Topology and health surfaces suitable for CLI/admin views.
 
 Detailed historical designs live in [archive/DESIGN_G1_G3.md](archive/DESIGN_G1_G3.md) and the
-[historical Fibril integration plan](https://github.com/Axmouth/fibril/blob/main/archive/replication-sharding-plan/REPLICATION_PLANNING.md).
+[historical Fibril integration plan](https://github.com/Organically-Distributed/fibril/blob/main/archive/replication-sharding-plan/REPLICATION_PLANNING.md).
 [archive/WORKLOG.md](archive/WORKLOG.md) preserves historical implementation notes.
 [API.md](API.md) defines the current public contract and lists what is partial, planned or out
 of scope per crate.
